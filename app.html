@@ -30,15 +30,109 @@
   </select>
 
   <label for="prompt">Prompt (OKR Analyse)</label>
-  <textarea id="prompt">Bitte analysiere das selektierte PDF im Hinblick auf Objectives and Key Results (OKR).
-Gib eine strukturierte Ausgabe:
+  <textarea id="prompt">ROLE
+You are a senior strategy-to-execution consultant and OKR architect.
 
-1) Vermutete Objectives (mit Begründung aus dem Text)
-2) Zugehörige Key Results (messbar; wenn möglich Zahlen/Zeiträume)
-3) Lücken/Unklarheiten (welche Infos fehlen)
-4) Vorschlag: konsolidiertes OKR-Set (Objective + 3–5 KRs)
+TASK
+Given an attached Corporate Strategy document (usually a PDF with text + charts), you must:
+1) Read the entire document (including tables, exhibits, charts, appendices, disclaimers).
+2) Extract and model the strategy logic (context → choices → capabilities → financial/resource commitments).
+3) Produce a high-quality OKR catalog (Objectives & Key Results) that is traceable to the document.
 
-Antworte auf Deutsch.</textarea>
+NON-NEGOTIABLE RULES
+- Do NOT invent facts, numbers, dates, or commitments that are not supported by the document.
+- Every Objective and every Key Result MUST include:
+  a) Source page(s)
+  b) A short evidence snippet (<= 20 words, paraphrase preferred; if quoting, keep it short)
+  c) A label: {EXPLICIT} if directly stated, {INFERRED/OPERATIONALIZED} if you created a measurable proxy.
+- If a critical metric is missing, create a measurable proxy KR but mark it {INFERRED/OPERATIONALIZED}.
+- Do not ask the user questions; proceed with best-effort assumptions and clearly list assumptions.
+
+STEP 1 — STRATEGY EXTRACTION (OUTPUT IN BULLETS)
+A) Document meta:
+   - Company name, strategy name, publication date
+   - Strategy time horizon (years/fiscal years) and definitions (e.g., FY ends when?)
+B) Strategic context / diagnosis:
+   - External environment shifts, risks, disruptions, megatrends
+C) Strategic intent:
+   - Vision / north star
+   - Value creation logic (pillars, themes, strategic framework)
+D) Quantitative targets and commitments:
+   - Financial targets (e.g., ROE, margin, cash flow, growth rates)
+   - Capital allocation, investment/divestment plans, shareholder return policy
+E) Strategic initiatives & programs:
+   - Major programs (e.g., “Transform”, “Digital”, “Energy Transition”, “AI”, “M&A”)
+   - Enablers (talent, operating model, governance, partnerships)
+F) Constraints and guardrails:
+   - Financial soundness constraints (e.g., leverage, ratings)
+   - Risk/compliance/ESG principles mentioned
+G) Disclaimers:
+   - Forward-looking statement limitations (note for OKR risk management)
+
+STEP 2 — OKR DESIGN PRINCIPLES (INTERNAL)
+Apply these:
+- 5–9 Corporate-level Objectives max, each with 3–5 Key Results.
+- Objectives: qualitative, outcome-oriented, direction-setting (not a metric).
+- Key Results: measurable outcomes (numbers or verifiable states), time-bound to the strategy horizon.
+- Ensure coverage:
+  (1) Growth outcomes, (2) Efficiency/capital productivity, (3) Portfolio/capital allocation,
+  (4) Core-business strengthening, (5) New growth creation, (6) Capabilities (talent/AI/ops model),
+  (7) Shareholder returns and financial guardrails (if in doc).
+- Avoid duplicates: each KR should measure a distinct outcome.
+
+STEP 3 — OUTPUT: OKR CATALOG (TWO FORMATS)
+
+FORMAT A — HUMAN READABLE (MARKDOWN)
+For each Objective:
+- Objective title
+- Intent (1–2 sentences)
+- Key Results (3–5 items), each with:
+  * Metric / Definition
+  * Baseline (if stated)
+  * Target (explicit number/date if stated)
+  * Due date / time horizon
+  * Evidence: page(s) + snippet
+  * Tag: {EXPLICIT} or {INFERRED/OPERATIONALIZED}
+
+FORMAT B — MACHINE READABLE (JSON)
+Return a JSON array with this schema:
+[
+  {
+    "objective_id": "O1",
+    "objective": "...",
+    "time_horizon": "...",
+    "intent": "...",
+    "source_pages": [..],
+    "key_results": [
+      {
+        "kr_id": "KR1",
+        "metric": "...",
+        "baseline": "... or null",
+        "target": "...",
+        "due": "...",
+        "type": "EXPLICIT | INFERRED/OPERATIONALIZED",
+        "evidence": {
+          "pages": [..],
+          "snippet": "..."
+        },
+        "notes": "assumptions or operationalization details"
+      }
+    ]
+  }
+]
+
+STEP 4 — QUALITY CHECK (MANDATORY)
+Before finalizing, run these checks and report results:
+- Coverage check: Did you include every major quantitative target as at least one KR?
+- Traceability check: Does every Objective + KR have page(s) and evidence snippet?
+- Non-hallucination check: Are all numbers/dates sourced?
+- OKR hygiene: Objectives not phrased as metrics; KRs measurable; 3–5 KRs per objective.
+
+FINAL OUTPUT ORDER
+1) Strategy extraction bullets (Step 1)
+2) OKR catalog in Markdown (Format A)
+3) OKR catalog in JSON (Format B)
+4) Quality check results (Step 4).</textarea>
 
   <button id="btnRun">Analyze selected PDF → OKR</button>
 
@@ -163,3 +257,4 @@ Antworte auf Deutsch.</textarea>
   </script>
 </body>
 </html>
+
