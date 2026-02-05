@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <title>PDF → OpenAI (OKR) – Demo</title>
+  <script src="https://miro.com/app/static/sdk/v2/miro.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; font-size: 13px; margin: 0; padding: 10px; color: #111827; }
+    h1 { font-size: 16px; margin: 0 0 10px 0; }
+    label { font-weight: 600; display:block; margin-top: 8px; }
+    input, textarea, select { width: 100%; box-sizing: border-box; margin-top: 4px; padding: 6px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 12px; }
+    textarea { min-height: 140px; resize: vertical; }
+    button { margin-top: 10px; padding: 8px 10px; font-size: 12px; border-radius: 6px; border: 1px solid #d1d5db; background: #f3f4f6; cursor: pointer; }
+    button:hover { background: #e5e7eb; }
+    #log { margin-top: 10px; height: 240px; overflow:auto; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 11px; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; background: #f9fafb; }
+  </style>
+</head>
+<body>
+  <h1>PDF → OpenAI (OKR) – Demo</h1>
+
+  <label for="backendUrl">Backend URL (Vercel)</label>
+  <input id="backendUrl" type="text" placeholder="https://dein-projekt.vercel.app" />
+
+  <label for="openaiKey">OpenAI API Key</label>
+  <input id="openaiKey" type="password" placeholder="sk-..." />
+
+  <label for="model">Modell</label>
+  <select id="model">
+    <option value="gpt-5.2">gpt-5.2</option>
+  </select>
+
+  <label for="prompt">Prompt (OKR Analyse)</label>
+  <textarea id="prompt">Bitte analysiere das selektierte PDF im Hinblick auf Objectives and Key Results (OKR).
+Gib eine strukturierte Ausgabe:
+
+1) Vermutete Objectives (mit Begründung aus dem Text)
+2) Zugehörige Key Results (messbar; wenn möglich Zahlen/Zeiträume)
+3) Lücken/Unklarheiten (welche Infos fehlen)
+4) Vorschlag: konsolidiertes OKR-Set (Objective + 3–5 KRs)
+
+Antworte auf Deutsch.</textarea>
+
+  <button id="btnRun">Analyze selected PDF → OKR</button>
+
+  <div id="log"></div>
+
+  <script>
+    function log(msg) {
+      const el = document.getElementById("log");
+      const t = (typeof msg === "string") ? msg : JSON.stringify(msg, null, 2);
+      el.textContent = (el.textContent ? el.textContent + "\n\n" : "") + t;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    async function ensureMiroReady() {
+      return new Promise((resolve) => {
+        const onReady = () => resolve();
+        if (window.miro && window.miro.board) return onReady();
+        if (window.miro && typeof window.miro.onReady === "function") return window.miro.onReady(onReady);
+        return onReady();
+      });
+    }
+
+    function normalizeBaseUrl(url) {
+      const u = (url || "").trim();
+      if (!u) return "";
+      return u.endsWith("/") ? u.slice(0, -1) : u;
+    }
+
+    async function run() {
+      await ensureMiroReady();
+
+      const backendUrl = normalizeBaseUrl(document.getElementById("backendUrl").value);
+      const openaiKey = document.getElementById("openaiKey").value.trim();
+      const model = document.getElementById("model").value;
+      const prompt = document.getElementById("prompt").value.trim();
+
+      if (!backendUrl) { log("Fehler: Backend URL fehlt."); return; }
+      if (!openaiKey) { log("Fehler: OpenAI API Key fehlt."); return; }
+
+      // Board-ID holen (Web SDK v2: board.getInfo())
+      let boardInfo;
+      try {
+        boardInfo = await miro.board.getInfo();
+      } catch (e) {
+        log("Fehler: miro.board.getInfo() fehlgeschlagen: " + e.message);
+        return;
+      }
+      const boardId = boardInfo && boardInfo.id ? boardInfo.id : null;
+      if (!boardId) { log("Fehler: Keine boardId gefunden."); return; }
+
+      // Selektion holen (du musst GENAU 1 PDF anklicken)
+      let selection;
+      try {
+        selection = await miro.board.getSelection();
+      } catch (e) {
+        log("Fehler: miro.board.getSelection() fehlgeschlagen: " + e.message);
+        return;
+      }
+
+      if (!Array.isArray(selection) || selection.length !== 1) {
+        log("Bitte genau 1 Item auswählen (das PDF). Aktuelle Auswahl: " + (selection ? selection.length : 0));
+        return;
+      }
+
+      const item = selection[0];
+      if (!item || !item.id) {
+        log("Fehler: Auswahl hat keine Item-ID.");
+        return;
+      }
+
+      // PDFs sind im Web SDK v2 typischerweise 'unsupported' – aber die ID reicht.
+      const itemId = item.id;
+
+      const payload = {
+        boardId,
+        itemId,
+        openaiKey,
+        model,
+        prompt
+      };
+
+      log("Request → Backend:\n" + JSON.stringify({ boardId, itemId, model, itemType: item.type || "unknown" }, null, 2));
+
+      try {
+        const res = await fetch(backendUrl + "/api/analyze-selected-pdf", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        const text = await res.text();
+        if (!res.ok) {
+          log("Backend Fehler " + res.status + ":\n" + text);
+          return;
+        }
+
+        const data = JSON.parse(text);
+        log("OK. Backend Response:");
+        log(data);
+
+        // Optional: Ergebnis direkt als Text-Item auf Board schreiben, falls Backend kein Doc erstellt hat
+        if (data && data.answer && !data.createdDocId) {
+          try {
+            const createdText = await miro.board.createText({
+              content: "<p><strong>OKR-Analyse (Fallback Text)</strong></p><p>" + String(data.answer).replaceAll("\n", "<br/>") + "</p>",
+              x: 0,
+              y: 0
+            });
+            log("Fallback: Text-Item erstellt: " + (createdText && createdText.id ? createdText.id : "(keine id)"));
+          } catch (eTxt) {
+            log("Fallback: Konnte Text-Item nicht erstellen: " + eTxt.message);
+          }
+        }
+
+      } catch (e) {
+        log("Exception beim Backend Call: " + e.message);
+      }
+    }
+
+    document.getElementById("btnRun").addEventListener("click", run);
+    log("Panel geladen.\n1) PDF auf dem Board anklicken (genau 1 Item).\n2) Backend URL + OpenAI Key eintragen.\n3) Button drücken.");
+  </script>
+</body>
+</html>
