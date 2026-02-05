@@ -66,12 +66,11 @@ export default async function handler(req, res) {
     // die mit Access Token abgerufen werden muss.
     const docData = doc && doc.data ? doc.data : {};
     const downloadUrl =
+      docData.documentUrl ||
       docData.downloadUrl ||
       docData.download_url ||
-      docData.url ||
-      docData.downloadLink ||
-      docData.download_link ||
       null;
+
 
     if (!downloadUrl) {
       res.status(500).json({
