@@ -13,9 +13,13 @@
   const BACKEND_URL = "https://miro-app-mcp.vercel.app";
   const MODEL = "gpt-5.2";
 
-  // Custom Action Event Name: lowercase + hyphens, max 30 chars
+  // === Existing OKR Action (unchanged) ===
   const ACTION_EVENT = "analyze-okr";
   const CUSTOM_EVENT = `custom:${ACTION_EVENT}`;
+
+  // === New MCP Table→Stickies Action ===
+  const TABLE_MCP_EVENT = "table-to-stickies-mcp";
+  const TABLE_CUSTOM_EVENT = `custom:${TABLE_MCP_EVENT}`;
 
   function truncate80(s) {
     const t = String(s || "").replace(/\s+/g, " ").trim();
@@ -30,6 +34,9 @@
     try { await miro.board.notifications.showError(truncate80(msg)); } catch (e) {}
   }
 
+  // ============================
+  // Existing: PDF → OKR (unchanged)
+  // ============================
   async function callBackend(boardId, itemId) {
     const payload = {
       boardId,
@@ -124,13 +131,101 @@
     }
   });
 
+  // ============================
+  // New: Table → Stickies (MCP Auto)
+  // ============================
+  async function callTableMcpBackend(boardId, tableItemId) {
+    const payload = { boardId, tableItemId };
+
+    const res = await fetch(`${BACKEND_URL}/api/table-to-stickies-mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(`Backend ${res.status}: ${text}`);
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      return { raw: text };
+    }
+  }
+
+  async function runTableToStickiesMcpForSelection() {
+    const boardInfo = await miro.board.getInfo();
+    const boardId = boardInfo && boardInfo.id ? boardInfo.id : null;
+    if (!boardId) {
+      throw new Error("No boardId available.");
+    }
+
+    const selection = await miro.board.getSelection();
+    if (!Array.isArray(selection) || selection.length !== 1) {
+      await notifyError("Select exactly 1 table item.");
+      return;
+    }
+
+    const item = selection[0];
+    if (!item || !item.id) {
+      await notifyError("Selection has no item id.");
+      return;
+    }
+
+    await notifyInfo("MCP table read started…");
+
+    const data = await callTableMcpBackend(boardId, item.id);
+
+    if (data && data.ok) {
+      await notifyInfo(`Created ${data.createdCount} stickies.`);
+      return;
+    }
+
+    await notifyInfo("Table → Stickies finished.");
+  }
+
+  // Subscribe MCP table custom action
+  await miro.board.ui.on(TABLE_CUSTOM_EVENT, async () => {
+    try {
+      await runTableToStickiesMcpForSelection();
+    } catch (e) {
+      await notifyError(e && e.message ? e.message : String(e));
+    }
+  });
+
+  // Register MCP table action
+  try {
+    await miro.board.experimental.action.deregister(TABLE_MCP_EVENT);
+  } catch (e) {
+    // ignore
+  }
+
+  await miro.board.experimental.action.register({
+    event: TABLE_MCP_EVENT,
+    ui: {
+      label: { en: "Table → Stickies (MCP Auto)" },
+      icon: "sparkles",
+      description: "Read selected table via Miro MCP and create a sticky for each cell."
+    },
+    scope: "local",
+    selection: "single",
+    predicate: {
+      type: { "$in": ["data_table_format", "table", "unsupported", "frame"] }
+    },
+    contexts: {
+      item: {}
+    }
+  });
+
   // Optional: clicking the app icon does NOT open a panel (production behavior).
   // It just tells users how to run it.
   await miro.board.ui.on("icon:click", async () => {
-    await notifyInfo("Select PDF → right-click → Analyze OKR.");
+    await notifyInfo("Select PDF → right-click → Analyze OKR. | Select Table → right-click → Table → Stickies (MCP Auto).");
   });
 
-  await notifyInfo("Ready: right-click a PDF → Analyze OKR.");
+  await notifyInfo("Ready: right-click a PDF → Analyze OKR. | right-click a Table → Table → Stickies (MCP Auto).");
 })();
 </script>
 </body>
