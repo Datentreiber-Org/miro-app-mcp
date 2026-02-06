@@ -2,15 +2,135 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>PDF → OpenAI Demo</title>
+  <title>PDF → OpenAI Demo (Headless)</title>
   <script src="https://miro.com/app/static/sdk/v2/miro.js"></script>
 </head>
 <body>
 <script>
 (async function init() {
-  await miro.board.ui.on("icon:click", async () => {
-    await miro.board.ui.openPanel({ url: "app.html" });
+  // === CONFIG (Production defaults) ===
+  // Backend URL ohne trailing slash
+  const BACKEND_URL = "https://miro-app-mcp.vercel.app";
+  const MODEL = "gpt-5.2";
+
+  // Custom Action Event Name: lowercase + hyphens, max 30 chars
+  const ACTION_EVENT = "analyze-okr";
+  const CUSTOM_EVENT = `custom:${ACTION_EVENT}`;
+
+  function truncate80(s) {
+    const t = String(s || "").replace(/\s+/g, " ").trim();
+    return t.length > 80 ? (t.slice(0, 77) + "...") : t;
+  }
+
+  async function notifyInfo(msg) {
+    try { await miro.board.notifications.showInfo(truncate80(msg)); } catch (e) {}
+  }
+
+  async function notifyError(msg) {
+    try { await miro.board.notifications.showError(truncate80(msg)); } catch (e) {}
+  }
+
+  async function callBackend(boardId, itemId) {
+    const payload = {
+      boardId,
+      itemId,
+      model: MODEL
+      // openaiKey + prompt werden NICHT gesendet (Backend nutzt Vercel ENV Defaults)
+    };
+
+    const res = await fetch(`${BACKEND_URL}/api/analyze-selected-pdf`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(`Backend ${res.status}: ${text}`);
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      return { raw: text };
+    }
+  }
+
+  async function runForCurrentSelection() {
+    const boardInfo = await miro.board.getInfo();
+    const boardId = boardInfo && boardInfo.id ? boardInfo.id : null;
+    if (!boardId) {
+      throw new Error("No boardId available.");
+    }
+
+    const selection = await miro.board.getSelection();
+    if (!Array.isArray(selection) || selection.length !== 1) {
+      await notifyError("Select exactly 1 PDF document.");
+      return;
+    }
+
+    const item = selection[0];
+    if (!item || !item.id) {
+      await notifyError("Selection has no item id.");
+      return;
+    }
+
+    await notifyInfo("OKR analysis started…");
+
+    const data = await callBackend(boardId, item.id);
+
+    if (data && data.createdDocId) {
+      await notifyInfo("OKR doc created on board.");
+      return;
+    }
+    if (data && data.createdTextId) {
+      await notifyInfo("OKR output created (text fallback).");
+      return;
+    }
+
+    await notifyInfo("OKR analysis finished.");
+  }
+
+  // 1) Subscribe to the custom event (required before register)
+  await miro.board.ui.on(CUSTOM_EVENT, async () => {
+    try {
+      await runForCurrentSelection();
+    } catch (e) {
+      await notifyError(e && e.message ? e.message : String(e));
+    }
   });
+
+  // 2) Register the custom action (MUST be in headless iframe)
+  try {
+    await miro.board.experimental.action.deregister(ACTION_EVENT);
+  } catch (e) {
+    // ignore
+  }
+
+  await miro.board.experimental.action.register({
+    event: ACTION_EVENT,
+    ui: {
+      label: { en: "Analyze OKR" },
+      icon: "chat-two",
+      description: "Analyze selected PDF and write the OKR result to a board doc."
+    },
+    scope: "local",
+    selection: "single",
+    predicate: {
+      type: "document"
+    },
+    contexts: {
+      item: {}
+    }
+  });
+
+  // Optional: clicking the app icon does NOT open a panel (production behavior).
+  // It just tells users how to run it.
+  await miro.board.ui.on("icon:click", async () => {
+    await notifyInfo("Select PDF → right-click → Analyze OKR.");
+  });
+
+  await notifyInfo("Ready: right-click a PDF → Analyze OKR.");
 })();
 </script>
 </body>
