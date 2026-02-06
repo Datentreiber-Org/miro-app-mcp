@@ -3,57 +3,42 @@ const DEFAULT_OKR_PROMPT = [
   "You are a senior strategy-to-execution consultant and OKR architect.",
   "",
   "TASK",
-  "Given the attached Corporate Strategy document (usually a PDF with text + charts), produce a corporate OKR catalog (Objectives & Key Results) that is traceable to the document.",
+  "Given the attached Corporate Strategy document (PDF with text + charts), produce a corporate OKR catalog that is traceable to the document.",
   "",
   "NON-NEGOTIABLE RULES",
   "- Do NOT invent facts, numbers, dates, or commitments that are not supported by the document.",
   "- Every Objective and every Key Result MUST include:",
   "  a) Source page(s)",
-  "  b) A short evidence snippet (<= 20 words, paraphrase preferred; if quoting, keep it short)",
+  "  b) Evidence snippet (<= 20 words; paraphrase preferred; short quote ok)",
   "  c) A label: {EXPLICIT} if directly stated, {INFERRED} if you created a measurable proxy.",
   "- If a critical metric is missing, create a measurable proxy KR but mark it {INFERRED}.",
-  "- Do not ask the user questions; proceed with best-effort assumptions and clearly list assumptions.",
+  "- Do not ask questions; proceed best-effort and list assumptions briefly if needed.",
   "",
-  "OKR DESIGN PRINCIPLES",
-  "- 5–9 Corporate-level Objectives max, each with 3–5 Key Results.",
-  "- Objectives: qualitative, outcome-oriented, direction-setting (not a metric).",
-  "- Key Results: measurable outcomes (numbers or verifiable states), time-bound to the strategy horizon.",
-  "- Ensure coverage across these themes IF they exist in the document:",
-  "  (1) Growth outcomes,",
-  "  (2) Efficiency / capital productivity,",
-  "  (3) Portfolio / capital allocation,",
-  "  (4) Core-business strengthening,",
-  "  (5) New growth creation,",
-  "  (6) Capabilities (talent/AI/ops model),",
-  "  (7) Shareholder returns and financial guardrails.",
-  "- Avoid duplicates: each KR should measure a distinct outcome.",
+  "OUTPUT FORMAT (IMPORTANT)",
+  "Return ONLY the final OKR catalog in MARKDOWN (no JSON, no extra sections, no analysis, no code fences).",
   "",
-  "OUTPUT (IMPORTANT)",
-  "Return ONLY the final OKR CATALOG as plain text (no Markdown, no JSON, no extra sections, no analysis, no internal reasoning).",
-  "Do NOT output strategy extraction, design principles, quality checks, or machine-readable formats.",
+  "MARKDOWN STRUCTURE",
+  "# OKR Catalog",
+  "- Company: <if stated, else 'not stated'>",
+  "- Strategy name: <if stated, else 'not stated'>",
+  "- Publication date: <if stated, else 'not stated'>",
+  "- Time horizon: <if stated, else 'not stated'>",
   "",
-  "FORMAT (PLAIN TEXT)",
-  "OKR CATALOG",
-  "Company: <if stated, else 'not stated'>",
-  "Strategy name: <if stated, else 'not stated'>",
-  "Publication date: <if stated, else 'not stated'>",
-  "Time horizon: <if stated, else 'not stated'>",
+  "## Objective O1: <title>",
+  "**Intent:** <1–2 sentences>",
+  "**Key Results:**",
+  "- **KR1:** <outcome> | Baseline: <.../n/a> | Target: <...> | Due: <...> | Evidence: p.<n> <snippet> | Tag: {EXPLICIT|INFERRED}",
+  "- **KR2:** ...",
+  "- **KR3:** ...",
   "",
-  "Objective O1: <objective title>",
-  "Intent: <1–2 sentences>",
-  "Key Results:",
-  "- KR1: <measurable outcome> | Baseline: <if stated else 'n/a'> | Target: <...> | Due: <...> | Evidence: p.<n> <snippet> | Tag: {EXPLICIT|INFERRED}",
-  "- KR2: <...> | Baseline: <...> | Target: <...> | Due: <...> | Evidence: p.<n> <snippet> | Tag: {EXPLICIT|INFERRED}",
-  "- KR3: <...> | Baseline: <...> | Target: <...> | Due: <...> | Evidence: p.<n> <snippet> | Tag: {EXPLICIT|INFERRED}",
+  "## Objective O2: <title>",
+  "**Intent:** <1–2 sentences>",
+  "**Key Results:**",
+  "- **KR1:** ...",
+  "- **KR2:** ...",
+  "- **KR3:** ...",
   "",
-  "Objective O2: <objective title>",
-  "Intent: <1–2 sentences>",
-  "Key Results:",
-  "- KR1: <...> | Baseline: <...> | Target: <...> | Due: <...> | Evidence: p.<n> <snippet> | Tag: {EXPLICIT|INFERRED}",
-  "- KR2: <...> | Baseline: <...> | Target: <...> | Due: <...> | Evidence: p.<n> <snippet> | Tag: {EXPLICIT|INFERRED}",
-  "- KR3: <...> | Baseline: <...> | Target: <...> | Due: <...> | Evidence: p.<n> <snippet> | Tag: {EXPLICIT|INFERRED}",
-  "",
-  "Continue O3..O9 as needed (max 9 objectives)."
+  "Continue up to O9 max (5–9 objectives total; 3–5 KRs per objective)."
 ].join("\n");
 
 export default async function handler(req, res) {
@@ -139,10 +124,7 @@ export default async function handler(req, res) {
       null;
 
     if (!downloadUrl) {
-      res.status(500).json({
-        error: "No download URL found in document item response.",
-        doc
-      });
+      res.status(500).json({ error: "No download URL found in document item response.", doc });
       return;
     }
 
@@ -164,53 +146,76 @@ export default async function handler(req, res) {
     const outX = srcPos.x + (srcGeom.width / 2) + 600;
     const outY = srcPos.y;
 
-    // 3) PDF binary laden (robust)
+    // 3) PDF binary laden
     const pdfBytes = await miroDownloadBinary(downloadUrl, MIRO_ACCESS_TOKEN);
 
     // 4) OpenAI: PDF upload → responses with input_file
     const fileMeta = await openaiUploadPdf(effectiveOpenaiKey, `miro-${itemId}.pdf`, pdfBytes);
+
+    // IMPORTANT: no artificial max_output_tokens cap here (leave unset)
     let answer = await openaiAnalyzePdf(effectiveOpenaiKey, effectiveModel, effectivePrompt, fileMeta.id);
-    answer = normalizeOkrsAnswer(answer);
+    answer = normalizeMarkdown(answer);
 
-    // 5) Ergebnis als Miro Doc (mehrere Fallback-Payloads), sonst Text
-    const title = `OKR Catalog – ${safeDocTitle(pdfTitleRaw)} – ${new Date().toISOString()}`;
+    // 5) Create Miro Doc Format Item correctly (Doc Formats OpenAPI: data.contentType + data.content)
+    // No title field exists; put the title into markdown content.
+    const docMarkdown =
+      `# OKR Catalog — ${escapeMdInline(pdfTitleRaw)}\n\n` +
+      answer;
 
-    const docCreate = await tryCreateDocFormatWithFallbacks({
-      boardId,
-      token: MIRO_ACCESS_TOKEN,
-      title,
-      contentPlain: answer,
-      x: outX,
-      y: outY
-    });
-
-    if (docCreate && docCreate.createdDocId) {
-      res.status(200).json({
-        ok: true,
-        boardId,
-        itemId,
-        openaiFileId: fileMeta.id,
-        createdDocId: docCreate.createdDocId,
-        createdTextId: null,
-        answer
-      });
-      return;
-    }
-
-    // Text-Fallback
+    let createdDocId = null;
     let createdTextId = null;
+    const docCreateErrors = [];
+
+    // Variant A: markdown
     try {
-      const createdText = await miroPostJson(
-        `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/texts`,
+      const created = await miroPostJson(
+        `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/docs`,
         MIRO_ACCESS_TOKEN,
         {
-          data: { content: answer },
+          data: {
+            contentType: "markdown",
+            content: docMarkdown
+          },
           position: { x: outX, y: outY, origin: "center" }
         }
       );
-      createdTextId = createdText && createdText.id ? String(createdText.id) : null;
-    } catch {
-      // ignore
+      createdDocId = created && created.id ? String(created.id) : null;
+    } catch (e) {
+      docCreateErrors.push(e && e.message ? e.message : String(e));
+    }
+
+    // Variant B: html (fallback)
+    if (!createdDocId) {
+      try {
+        const created = await miroPostJson(
+          `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/docs`,
+          MIRO_ACCESS_TOKEN,
+          {
+            data: {
+              contentType: "html",
+              content: toSimpleHtml(docMarkdown)
+            },
+            position: { x: outX, y: outY, origin: "center" }
+          }
+        );
+        createdDocId = created && created.id ? String(created.id) : null;
+      } catch (e) {
+        docCreateErrors.push(e && e.message ? e.message : String(e));
+      }
+    }
+
+    // Text fallback only if doc creation failed completely
+    if (!createdDocId) {
+      try {
+        const createdText = await miroPostJson(
+          `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/texts`,
+          MIRO_ACCESS_TOKEN,
+          { data: { content: answer }, position: { x: outX, y: outY, origin: "center" } }
+        );
+        createdTextId = createdText && createdText.id ? String(createdText.id) : null;
+      } catch {
+        // ignore
+      }
     }
 
     res.status(200).json({
@@ -218,109 +223,14 @@ export default async function handler(req, res) {
       boardId,
       itemId,
       openaiFileId: fileMeta.id,
-      createdDocId: null,
+      createdDocId,
       createdTextId,
-      answer,
-      docCreateErrors: docCreate && Array.isArray(docCreate.errors) ? docCreate.errors : []
+      docCreateErrors,
+      answer
     });
   } catch (e) {
     res.status(500).send(e && e.message ? e.message : String(e));
   }
-}
-
-async function tryCreateDocFormatWithFallbacks({ boardId, token, title, contentPlain, x, y }) {
-  const errors = [];
-
-  const payloads = [];
-
-  // Variant 1: plain text
-  payloads.push({
-    data: { title, content: contentPlain },
-    position: { x, y, origin: "center" }
-  });
-
-  // Variant 2: simple HTML
-  payloads.push({
-    data: { title, content: toSimpleHtml(contentPlain) },
-    position: { x, y, origin: "center" }
-  });
-
-  // Variant 3: no origin
-  payloads.push({
-    data: { title, content: contentPlain },
-    position: { x, y }
-  });
-
-  // Variant 4: top_left origin
-  payloads.push({
-    data: { title, content: contentPlain },
-    position: { x, y, origin: "top_left" }
-  });
-
-  for (let i = 0; i < payloads.length; i++) {
-    try {
-      const created = await miroPostJson(
-        `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/docs`,
-        token,
-        payloads[i]
-      );
-      const createdDocId = created && created.id ? String(created.id) : null;
-      if (createdDocId) {
-        return { createdDocId, errors };
-      }
-      errors.push(`Variant ${i + 1}: created doc response had no id.`);
-    } catch (e) {
-      errors.push(`Variant ${i + 1}: ${e && e.message ? e.message : String(e)}`);
-    }
-  }
-
-  return { createdDocId: null, errors };
-}
-
-function normalizeOkrsAnswer(answer) {
-  if (typeof answer !== "string") return "";
-  let t = answer.trim();
-
-  // Remove code fences if any
-  if (t.startsWith("```")) {
-    t = t.replace(/^```[a-zA-Z0-9_-]*\s*\r?\n?/, "");
-    t = t.replace(/\r?\n```$/, "");
-    t = t.replace(/```$/, "");
-    t = t.trim();
-  }
-
-  // Hard stop if model still outputs JSON accidentally
-  const idx = t.toLowerCase().indexOf("{");
-  if (idx !== -1) {
-    const before = t.slice(0, idx).trim();
-    if (before.length > 0) {
-      t = before;
-    }
-  }
-
-  return t;
-}
-
-function safeDocTitle(s) {
-  const t = String(s || "").trim();
-  if (!t) return "Strategy PDF";
-  const max = 60;
-  if (t.length <= max) return t;
-  return t.slice(0, max - 3) + "...";
-}
-
-function escapeHtml(s) {
-  return String(s || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-}
-
-function toSimpleHtml(plain) {
-  const esc = escapeHtml(plain);
-  const paragraphs = esc.split(/\n\s*\n/);
-  const htmlParas = paragraphs.map((p) => `<p>${p.replaceAll("\n", "<br/>")}</p>`);
-  return htmlParas.join("");
 }
 
 async function readJson(req) {
@@ -335,10 +245,7 @@ async function readJson(req) {
 }
 
 async function miroGetJson(url, token) {
-  const res = await fetch(url, {
-    method: "GET",
-    headers: { Authorization: `Bearer ${token}` }
-  });
+  const res = await fetch(url, { method: "GET", headers: { Authorization: `Bearer ${token}` } });
   const text = await res.text();
   if (!res.ok) throw new Error(`Miro GET ${url} → ${res.status}: ${text}`);
   return text ? JSON.parse(text) : null;
@@ -347,15 +254,44 @@ async function miroGetJson(url, token) {
 async function miroPostJson(url, token, payload) {
   const res = await fetch(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json"
-    },
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
   const text = await res.text();
   if (!res.ok) throw new Error(`Miro POST ${url} → ${res.status}: ${text}`);
   return text ? JSON.parse(text) : null;
+}
+
+function normalizeMarkdown(s) {
+  if (typeof s !== "string") return "";
+  let t = s.trim();
+
+  // remove code fences if model adds them
+  if (t.startsWith("```")) {
+    t = t.replace(/^```[a-zA-Z0-9_-]*\s*\r?\n?/, "");
+    t = t.replace(/\r?\n```$/, "");
+    t = t.replace(/```$/, "");
+    t = t.trim();
+  }
+  return t;
+}
+
+function escapeMdInline(s) {
+  return String(s || "").replaceAll("\n", " ").replaceAll("|", "\\|").trim();
+}
+
+function escapeHtml(s) {
+  return String(s || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function toSimpleHtml(markdownish) {
+  const esc = escapeHtml(markdownish);
+  const paragraphs = esc.split(/\n\s*\n/);
+  const htmlParas = paragraphs.map((p) => `<p>${p.replaceAll("\n", "<br/>")}</p>`);
+  return htmlParas.join("");
 }
 
 function isPdfMagic(bytes) {
@@ -385,16 +321,10 @@ async function readBytes(res) {
 
 function extractUrlCandidatesFromJson(obj) {
   const urls = [];
-
   function pushIfString(v) {
-    if (typeof v === "string" && v.trim()) {
-      urls.push(v.trim());
-    }
+    if (typeof v === "string" && v.trim()) urls.push(v.trim());
   }
-
-  if (!obj || typeof obj !== "object") {
-    return urls;
-  }
+  if (!obj || typeof obj !== "object") return urls;
 
   pushIfString(obj.url);
   pushIfString(obj.downloadUrl);
@@ -412,13 +342,11 @@ function extractUrlCandidatesFromJson(obj) {
     pushIfString(obj.data.document_url);
     pushIfString(obj.data.href);
   }
-
   if (obj.links && typeof obj.links === "object") {
     pushIfString(obj.links.download);
     pushIfString(obj.links.file);
     pushIfString(obj.links.self);
   }
-
   if (obj._links && typeof obj._links === "object") {
     pushIfString(obj._links.download);
     pushIfString(obj._links.file);
@@ -428,37 +356,25 @@ function extractUrlCandidatesFromJson(obj) {
   for (const k of Object.keys(obj)) {
     const v = obj[k];
     if (typeof v === "string") {
-      if (v.startsWith("http://") || v.startsWith("https://")) {
-        urls.push(v);
-      }
+      if (v.startsWith("http://") || v.startsWith("https://")) urls.push(v);
     } else if (v && typeof v === "object" && !Array.isArray(v)) {
       for (const k2 of Object.keys(v)) {
         const v2 = v[k2];
-        if (typeof v2 === "string" && (v2.startsWith("http://") || v2.startsWith("https://"))) {
-          urls.push(v2);
-        }
+        if (typeof v2 === "string" && (v2.startsWith("http://") || v2.startsWith("https://"))) urls.push(v2);
       }
     }
   }
-
   return Array.from(new Set(urls));
 }
 
 async function fetchWithOptionalAuth(url, token, withAuth) {
   const headers = {};
-  if (withAuth) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-  return fetch(url, {
-    method: "GET",
-    headers,
-    redirect: "follow"
-  });
+  if (withAuth) headers.Authorization = `Bearer ${token}`;
+  return fetch(url, { method: "GET", headers, redirect: "follow" });
 }
 
 async function miroDownloadBinary(downloadUrl, token) {
   const res1 = await fetchWithOptionalAuth(downloadUrl, token, true);
-
   if (!res1.ok) {
     const t = await res1.text().catch(() => "");
     throw new Error(`Download (step1) failed ${res1.status}: ${t}`);
@@ -478,7 +394,6 @@ async function miroDownloadBinary(downloadUrl, token) {
   if (ct1.includes("application/json")) {
     const meta = await res1.json().catch(() => null);
     const candidates = extractUrlCandidatesFromJson(meta);
-
     if (!candidates.length) {
       throw new Error(`Download (step1) returned JSON but no URL candidates found. content-type=${ct1}`);
     }
@@ -499,20 +414,10 @@ async function miroDownloadBinary(downloadUrl, token) {
           const t2 = await res2.text().catch(() => "");
           throw new Error(`Download (step2/auth) failed ${res2.status}: ${t2}`);
         }
-
         const ct2 = getHeaderLower(res2, "content-type");
         const bytes2 = await readBytes(res2);
-
-        if (ct2.includes("application/pdf") || isPdfMagic(bytes2)) {
-          if (!isPdfMagic(bytes2)) {
-            const head = Array.from(bytes2.slice(0, 16)).map((b) => b.toString(16).padStart(2, "0")).join("");
-            throw new Error(`Download (step2/auth) ct=${ct2} but missing %PDF magic. headHex=${head}`);
-          }
-          return bytes2;
-        }
-
-        const head2 = Array.from(bytes2.slice(0, 16)).map((b) => b.toString(16).padStart(2, "0")).join("");
-        lastErr = new Error(`Download (step2/auth) not PDF. ct=${ct2 || "(none)"} headHex=${head2}`);
+        if (ct2.includes("application/pdf") || isPdfMagic(bytes2)) return bytes2;
+        lastErr = new Error(`Download (step2/auth) not PDF. ct=${ct2 || "(none)"}`);
       } catch (e) {
         lastErr = e;
       }
@@ -523,50 +428,22 @@ async function miroDownloadBinary(downloadUrl, token) {
           const t3 = await res3.text().catch(() => "");
           throw new Error(`Download (step2/noauth) failed ${res3.status}: ${t3}`);
         }
-
         const ct3 = getHeaderLower(res3, "content-type");
         const bytes3 = await readBytes(res3);
-
-        if (ct3.includes("application/pdf") || isPdfMagic(bytes3)) {
-          if (!isPdfMagic(bytes3)) {
-            const head = Array.from(bytes3.slice(0, 16)).map((b) => b.toString(16).padStart(2, "0")).join("");
-            throw new Error(`Download (step2/noauth) ct=${ct3} but missing %PDF magic. headHex=${head}`);
-          }
-          return bytes3;
-        }
-
-        const head3 = Array.from(bytes3.slice(0, 16)).map((b) => b.toString(16).padStart(2, "0")).join("");
-        lastErr = new Error(`Download (step2/noauth) not PDF. ct=${ct3 || "(none)"} headHex=${head3}`);
+        if (ct3.includes("application/pdf") || isPdfMagic(bytes3)) return bytes3;
+        lastErr = new Error(`Download (step2/noauth) not PDF. ct=${ct3 || "(none)"}`);
       } catch (e) {
         lastErr = e;
       }
     }
 
-    throw new Error(
-      `Could not resolve PDF from JSON. Tried ${sorted.length} candidate(s). Last error: ${lastErr && lastErr.message ? lastErr.message : String(lastErr)}`
-    );
+    throw new Error(`Could not resolve PDF from JSON. Last error: ${lastErr && lastErr.message ? lastErr.message : String(lastErr)}`);
   }
 
   const bytes1 = await readBytes(res1);
-  if (isPdfMagic(bytes1)) {
-    return bytes1;
-  }
+  if (isPdfMagic(bytes1)) return bytes1;
 
-  const res4 = await fetchWithOptionalAuth(downloadUrl, token, false);
-  if (res4.ok) {
-    const ct4 = getHeaderLower(res4, "content-type");
-    const bytes4 = await readBytes(res4);
-    if (ct4.includes("application/pdf") || isPdfMagic(bytes4)) {
-      if (!isPdfMagic(bytes4)) {
-        const head = Array.from(bytes4.slice(0, 16)).map((b) => b.toString(16).padStart(2, "0")).join("");
-        throw new Error(`Download (step3/noauth) ct=${ct4} but missing %PDF magic. headHex=${head}`);
-      }
-      return bytes4;
-    }
-  }
-
-  const head1 = Array.from(bytes1.slice(0, 32)).map((b) => b.toString(16).padStart(2, "0")).join("");
-  throw new Error(`Download did not yield a PDF. step1 content-type=${ct1 || "(none)"} headHex=${head1}`);
+  throw new Error(`Download did not yield a PDF. step1 content-type=${ct1 || "(none)"}`);
 }
 
 async function openaiUploadPdf(openaiKey, filename, bytes) {
@@ -607,8 +484,8 @@ async function openaiAnalyzePdf(openaiKey, model, prompt, fileId) {
           { type: "input_text", text: prompt }
         ]
       }
-    ],
-    max_output_tokens: 2500
+    ]
+    // IMPORTANT: do NOT set max_output_tokens here (no artificial cap). :contentReference[oaicite:2]{index=2}
   };
 
   const res = await fetch("https://api.openai.com/v1/responses", {
