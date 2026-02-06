@@ -189,6 +189,7 @@
   // Subscribe MCP table custom action
   await miro.board.ui.on(TABLE_CUSTOM_EVENT, async () => {
     try {
+      await notifyInfo("Custom action fired.");
       await runTableToStickiesMcpForSelection();
     } catch (e) {
       await notifyError(e && e.message ? e.message : String(e));
@@ -202,6 +203,8 @@
     // ignore
   }
 
+  // IMPORTANT: no predicate while debugging visibility.
+  // This ensures the menu item appears for ANY single selected item.
   await miro.board.experimental.action.register({
     event: TABLE_MCP_EVENT,
     ui: {
@@ -211,9 +214,6 @@
     },
     scope: "local",
     selection: "single",
-    predicate: {
-      type: { "$in": ["data_table_format", "table", "unsupported", "frame"] }
-    },
     contexts: {
       item: {}
     }
@@ -222,10 +222,10 @@
   // Optional: clicking the app icon does NOT open a panel (production behavior).
   // It just tells users how to run it.
   await miro.board.ui.on("icon:click", async () => {
-    await notifyInfo("Select PDF → right-click → Analyze OKR. | Select Table → right-click → Table → Stickies (MCP Auto).");
+    await notifyInfo("Select PDF → right-click → Analyze OKR. | Select any item → right-click → Table → Stickies (MCP Auto).");
   });
 
-  await notifyInfo("Ready: right-click a PDF → Analyze OKR. | right-click a Table → Table → Stickies (MCP Auto).");
+  await notifyInfo("Ready: right-click a PDF → Analyze OKR. | right-click any item → Table → Stickies (MCP Auto).");
 })();
 </script>
 </body>
