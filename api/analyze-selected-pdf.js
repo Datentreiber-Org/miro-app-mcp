@@ -1,3 +1,107 @@
+const DEFAULT_OKR_PROMPT = `ROLE
+You are a senior strategy-to-execution consultant and OKR architect.
+
+TASK
+Given an attached Corporate Strategy document (usually a PDF with text + charts), you must:
+1) Read the entire document (including tables, exhibits, charts, appendices, disclaimers).
+2) Extract and model the strategy logic (context → choices → capabilities → financial/resource commitments).
+3) Produce a high-quality OKR catalog (Objectives & Key Results) that is traceable to the document.
+
+NON-NEGOTIABLE RULES
+- Do NOT invent facts, numbers, dates, or commitments that are not supported by the document.
+- Every Objective and every Key Result MUST include:
+  a) Source page(s)
+  b) A short evidence snippet (<= 20 words, paraphrase preferred; if quoting, keep it short)
+  c) A label: {EXPLICIT} if directly stated, {INFERRED/OPERATIONALIZED} if you created a measurable proxy.
+- If a critical metric is missing, create a measurable proxy KR but mark it {INFERRED/OPERATIONALIZED}.
+- Do not ask the user questions; proceed with best-effort assumptions and clearly list assumptions.
+
+STEP 1 — STRATEGY EXTRACTION (OUTPUT IN BULLETS)
+A) Document meta:
+   - Company name, strategy name, publication date
+   - Strategy time horizon (years/fiscal years) and definitions (e.g., FY ends when?)
+B) Strategic context / diagnosis:
+   - External environment shifts, risks, disruptions, megatrends
+C) Strategic intent:
+   - Vision / north star
+   - Value creation logic (pillars, themes, strategic framework)
+D) Quantitative targets and commitments:
+   - Financial targets (e.g., ROE, margin, cash flow, growth rates)
+   - Capital allocation, investment/divestment plans, shareholder return policy
+E) Strategic initiatives & programs:
+   - Major programs (e.g., “Transform”, “Digital”, “Energy Transition”, “AI”, “M&A”)
+   - Enablers (talent, operating model, governance, partnerships)
+F) Constraints and guardrails:
+   - Financial soundness constraints (e.g., leverage, ratings)
+   - Risk/compliance/ESG principles mentioned
+G) Disclaimers:
+   - Forward-looking statement limitations (note for OKR risk management)
+
+STEP 2 — OKR DESIGN PRINCIPLES (INTERNAL)
+Apply these:
+- 5–9 Corporate-level Objectives max, each with 3–5 Key Results.
+- Objectives: qualitative, outcome-oriented, direction-setting (not a metric).
+- Key Results: measurable outcomes (numbers or verifiable states), time-bound to the strategy horizon.
+- Ensure coverage:
+  (1) Growth outcomes, (2) Efficiency/capital productivity, (3) Portfolio/capital allocation,
+  (4) Core-business strengthening, (5) New growth creation, (6) Capabilities (talent/AI/ops model),
+  (7) Shareholder returns and financial guardrails (if in doc).
+- Avoid duplicates: each KR should measure a distinct outcome.
+
+STEP 3 — OUTPUT: OKR CATALOG (TWO FORMATS)
+
+FORMAT A — HUMAN READABLE (MARKDOWN)
+For each Objective:
+- Objective title
+- Intent (1–2 sentences)
+- Key Results (3–5 items), each with:
+  * Metric / Definition
+  * Baseline (if stated)
+  * Target (explicit number/date if stated)
+  * Due date / time horizon
+  * Evidence: page(s) + snippet
+  * Tag: {EXPLICIT} or {INFERRED/OPERATIONALIZED}
+
+FORMAT B — MACHINE READABLE (JSON)
+Return a JSON array with this schema:
+[
+  {
+    "objective_id": "O1",
+    "objective": "...",
+    "time_horizon": "...",
+    "intent": "...",
+    "source_pages": [..],
+    "key_results": [
+      {
+        "kr_id": "KR1",
+        "metric": "...",
+        "baseline": "... or null",
+        "target": "...",
+        "due": "...",
+        "type": "EXPLICIT | INFERRED/OPERATIONALIZED",
+        "evidence": {
+          "pages": [..],
+          "snippet": "..."
+        },
+        "notes": "assumptions or operationalization details"
+      }
+    ]
+  }
+]
+
+STEP 4 — QUALITY CHECK (MANDATORY)
+Before finalizing, run these checks and report results:
+- Coverage check: Did you include every major quantitative target as at least one KR?
+- Traceability check: Does every Objective + KR have page(s) and evidence snippet?
+- Non-hallucination check: Are all numbers/dates sourced?
+- OKR hygiene: Objectives not phrased as metrics; KRs measurable; 3–5 KRs per objective.
+
+FINAL OUTPUT ORDER
+1) Strategy extraction bullets (Step 1)
+2) OKR catalog in Markdown (Format A)
+3) OKR catalog in JSON (Format B)
+4) Quality check results (Step 4).`;
+
 export default async function handler(req, res) {
   // --- Quick & Dirty CORS ---
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -14,11 +118,13 @@ export default async function handler(req, res) {
     return;
   }
 
-  const MIRO_ACCESS_TOKEN = process.env.MIRO_ACCESS_TOKEN || "";
+  const MIRO_ACCESS_TOKEN = (process.env.MIRO_ACCESS_TOKEN || "").trim();
   if (!MIRO_ACCESS_TOKEN) {
     res.status(500).send("Server misconfigured: MIRO_ACCESS_TOKEN is missing.");
     return;
   }
+
+  const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || "").trim();
 
   // Robust JSON body parse (Vercel Node Functions sind nicht immer automatisch geparst)
   const body = await readJson(req).catch(() => null);
@@ -33,18 +139,23 @@ export default async function handler(req, res) {
     res.status(400).send("boardId or itemId missing.");
     return;
   }
-  if (!openaiKey) {
-    res.status(400).send("openaiKey missing.");
-    return;
-  }
-  if (!prompt) {
-    res.status(400).send("prompt missing.");
+
+  const effectiveOpenaiKey =
+    (typeof openaiKey === "string" && openaiKey.trim()) ? openaiKey.trim() : OPENAI_API_KEY;
+
+  if (!effectiveOpenaiKey) {
+    res.status(400).send("openaiKey missing (set OPENAI_API_KEY in Vercel env or pass openaiKey).");
     return;
   }
 
+  const effectiveModel =
+    (typeof model === "string" && model.trim()) ? model.trim() : "gpt-5.2";
+
+  const effectivePrompt =
+    (typeof prompt === "string" && prompt.trim()) ? prompt.trim() : DEFAULT_OKR_PROMPT;
+
   try {
     // 1) Item typisieren: /v2/boards/{board_id}/items/{item_id}
-    // (Damit wir sicher wissen, dass es ein Document Item ist.)
     const item = await miroGetJson(
       `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(itemId)}`,
       MIRO_ACCESS_TOKEN
@@ -62,9 +173,6 @@ export default async function handler(req, res) {
       MIRO_ACCESS_TOKEN
     );
 
-    // Miro liefert in der Praxis häufig doc.data.documentUrl (z.B. /resources/documents/...).
-    // Diese URL liefert NICHT zwingend direkt PDF-Binary; sie kann JSON-Metadaten liefern (z.B. redirect=false),
-    // die wiederum einen presigned Download-Link enthalten. Deshalb: robustes Resolve + PDF-Magic-Check.
     const docData = doc && doc.data ? doc.data : {};
     const downloadUrl =
       docData.documentUrl ||
@@ -80,32 +188,62 @@ export default async function handler(req, res) {
       return;
     }
 
+    // Position near the selected PDF (best-effort)
+    const srcPos = (doc && doc.position && typeof doc.position.x === "number" && typeof doc.position.y === "number")
+      ? doc.position
+      : (item && item.position && typeof item.position.x === "number" && typeof item.position.y === "number")
+        ? item.position
+        : { x: 0, y: 0 };
+
+    const srcGeom = (doc && doc.geometry && typeof doc.geometry.width === "number" && typeof doc.geometry.height === "number")
+      ? doc.geometry
+      : (item && item.geometry && typeof item.geometry.width === "number" && typeof item.geometry.height === "number")
+        ? item.geometry
+        : { width: 800, height: 600 };
+
+    const outX = srcPos.x + (srcGeom.width / 2) + 600;
+    const outY = srcPos.y;
+
     // 3) PDF binary laden (robust: JSON-Metadaten/Redirects/Presigned URLs/PDF-Header prüfen)
     const pdfBytes = await miroDownloadBinary(downloadUrl, MIRO_ACCESS_TOKEN);
 
     // 4) OpenAI: PDF upload → responses with input_file
-    const fileMeta = await openaiUploadPdf(openaiKey, `miro-${itemId}.pdf`, pdfBytes);
-    const answer = await openaiAnalyzePdf(openaiKey, model || "gpt-5.2", prompt, fileMeta.id);
+    const fileMeta = await openaiUploadPdf(effectiveOpenaiKey, `miro-${itemId}.pdf`, pdfBytes);
+    const answer = await openaiAnalyzePdf(effectiveOpenaiKey, effectiveModel, effectivePrompt, fileMeta.id);
 
-    // 5) Optional: Versuch, ein Doc Format auf dem Board anzulegen
-    // Doc Formats sind native Miro Docs (nicht PDFs) und haben eigene Endpoints.
-    // Falls das Payload nicht passt/Account das blockt: wir geben answer trotzdem zurück.
+    // 5) Ergebnis direkt auf Board schreiben:
+    // Primär: Doc Format
+    // Fallback: Text Item (falls Doc Format scheitert)
     let createdDocId = null;
+    let createdTextId = null;
+
     try {
       const title = `OKR-Analyse – ${new Date().toISOString()}`;
-      const content = answer; // Quick & Dirty: plain text
+      const content = answer;
 
       const created = await miroPostJson(
         `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/docs`,
         MIRO_ACCESS_TOKEN,
         {
           data: { title, content },
-          position: { x: 0, y: 0, origin: "center" }
+          position: { x: outX, y: outY, origin: "center" }
         }
       );
       createdDocId = created && created.id ? String(created.id) : null;
     } catch (eDoc) {
-      // ignore → fallback im Frontend möglich
+      try {
+        const createdText = await miroPostJson(
+          `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/texts`,
+          MIRO_ACCESS_TOKEN,
+          {
+            data: { content: answer },
+            position: { x: outX, y: outY, origin: "center" }
+          }
+        );
+        createdTextId = createdText && createdText.id ? String(createdText.id) : null;
+      } catch (eText) {
+        // ignore
+      }
     }
 
     res.status(200).json({
@@ -114,6 +252,7 @@ export default async function handler(req, res) {
       itemId,
       openaiFileId: fileMeta.id,
       createdDocId,
+      createdTextId,
       answer
     });
   } catch (e) {
@@ -267,7 +406,6 @@ async function miroDownloadBinary(downloadUrl, token) {
   // 4) Retry the second fetch WITHOUT Authorization as presigned URLs often don't need it.
   // 5) Provide actionable error details (content-type + first bytes as hex snippet).
 
-  // ---- First request (with auth) ----
   const res1 = await fetchWithOptionalAuth(downloadUrl, token, true);
 
   if (!res1.ok) {
@@ -277,7 +415,6 @@ async function miroDownloadBinary(downloadUrl, token) {
 
   const ct1 = getHeaderLower(res1, "content-type");
 
-  // If content-type claims PDF, verify magic and return
   if (ct1.includes("application/pdf")) {
     const bytes = await readBytes(res1);
     if (!isPdfMagic(bytes)) {
@@ -287,18 +424,14 @@ async function miroDownloadBinary(downloadUrl, token) {
     return bytes;
   }
 
-  // If JSON, parse and resolve
   if (ct1.includes("application/json")) {
     const meta = await res1.json().catch(() => null);
     const candidates = extractUrlCandidatesFromJson(meta);
 
     if (!candidates.length) {
-      throw new Error(
-        `Download (step1) returned JSON but no download URL candidates found. content-type=${ct1}`
-      );
+      throw new Error(`Download (step1) returned JSON but no URL candidates found. content-type=${ct1}`);
     }
 
-    // Prefer non-api.miro.com URLs if present (often presigned file/CDN)
     const sorted = candidates.slice().sort((a, b) => {
       const aIsMiroApi = a.includes("api.miro.com");
       const bIsMiroApi = b.includes("api.miro.com");
@@ -309,7 +442,6 @@ async function miroDownloadBinary(downloadUrl, token) {
     let lastErr = null;
 
     for (const u of sorted) {
-      // Try with auth first
       try {
         const res2 = await fetchWithOptionalAuth(u, token, true);
         if (!res2.ok) {
@@ -328,14 +460,12 @@ async function miroDownloadBinary(downloadUrl, token) {
           return bytes2;
         }
 
-        // Not PDF, keep trying candidates
         const head2 = Array.from(bytes2.slice(0, 16)).map((b) => b.toString(16).padStart(2, "0")).join("");
         lastErr = new Error(`Download (step2/auth) not PDF. ct=${ct2 || "(none)"} headHex=${head2}`);
       } catch (e) {
         lastErr = e;
       }
 
-      // Try without auth (presigned URLs often require no auth; some reject extra headers)
       try {
         const res3 = await fetchWithOptionalAuth(u, token, false);
         if (!res3.ok) {
@@ -362,17 +492,15 @@ async function miroDownloadBinary(downloadUrl, token) {
     }
 
     throw new Error(
-      `Could not resolve PDF from documentUrl JSON. Tried ${sorted.length} candidate(s). Last error: ${lastErr && lastErr.message ? lastErr.message : String(lastErr)}`
+      `Could not resolve PDF from JSON. Tried ${sorted.length} candidate(s). Last error: ${lastErr && lastErr.message ? lastErr.message : String(lastErr)}`
     );
   }
 
-  // Not JSON and not declared PDF: read bytes and validate magic
   const bytes1 = await readBytes(res1);
   if (isPdfMagic(bytes1)) {
     return bytes1;
   }
 
-  // As a last resort: try the same URL without auth (some endpoints might behave differently)
   const res4 = await fetchWithOptionalAuth(downloadUrl, token, false);
   if (res4.ok) {
     const ct4 = getHeaderLower(res4, "content-type");
@@ -394,12 +522,11 @@ async function openaiUploadPdf(openaiKey, filename, bytes) {
   const form = new FormData();
   form.append("purpose", "user_data");
 
-  // Ensure filename ends with .pdf (helps downstream heuristics)
-  const safeName = (typeof filename === "string" && filename.toLowerCase().endsWith(".pdf"))
-    ? filename
-    : "document.pdf";
+  const safeName =
+    (typeof filename === "string" && filename.toLowerCase().endsWith(".pdf"))
+      ? filename
+      : "document.pdf";
 
-  // Double-check magic before upload to fail fast with a clear server-side error
   if (!isPdfMagic(bytes)) {
     const head = Array.from((bytes || []).slice(0, 32)).map((b) => b.toString(16).padStart(2, "0")).join("");
     throw new Error(`Refusing to upload non-PDF bytes to OpenAI. headHex=${head}`);
