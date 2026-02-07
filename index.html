@@ -9,7 +9,6 @@
 <script>
 (async function init() {
   // === CONFIG (Production defaults) ===
-  // Backend URL ohne trailing slash
   const BACKEND_URL = "https://miro-app-mcp.vercel.app";
   const MODEL = "gpt-5.2";
 
@@ -17,7 +16,7 @@
   const ACTION_EVENT = "analyze-okr";
   const CUSTOM_EVENT = `custom:${ACTION_EVENT}`;
 
-  // === New MCP Table→Stickies Action ===
+  // === MCP Table→Stickies (Auto) ===
   const TABLE_MCP_EVENT = "table-to-stickies-mcp";
   const TABLE_CUSTOM_EVENT = `custom:${TABLE_MCP_EVENT}`;
 
@@ -35,14 +34,13 @@
   }
 
   // ============================
-  // Existing: PDF → OKR (unchanged)
+  // Existing: PDF → OKR (UNCHANGED)
   // ============================
   async function callBackend(boardId, itemId) {
     const payload = {
       boardId,
       itemId,
       model: MODEL
-      // openaiKey + prompt werden NICHT gesendet (Backend nutzt Vercel ENV Defaults)
     };
 
     const res = await fetch(`${BACKEND_URL}/api/analyze-selected-pdf`, {
@@ -98,7 +96,6 @@
     await notifyInfo("OKR analysis finished.");
   }
 
-  // 1) Subscribe to the custom event (required before register)
   await miro.board.ui.on(CUSTOM_EVENT, async () => {
     try {
       await runForCurrentSelection();
@@ -107,12 +104,7 @@
     }
   });
 
-  // 2) Register the custom action (MUST be in headless iframe)
-  try {
-    await miro.board.experimental.action.deregister(ACTION_EVENT);
-  } catch (e) {
-    // ignore
-  }
+  try { await miro.board.experimental.action.deregister(ACTION_EVENT); } catch (e) {}
 
   await miro.board.experimental.action.register({
     event: ACTION_EVENT,
@@ -123,16 +115,12 @@
     },
     scope: "local",
     selection: "single",
-    predicate: {
-      type: "document"
-    },
-    contexts: {
-      item: {}
-    }
+    predicate: { type: "document" },
+    contexts: { item: {} }
   });
 
   // ============================
-  // New: Table → Stickies (MCP Auto)
+  // MCP: Table → Stickies (Auto)
   // ============================
   async function callTableMcpBackend(boardId, tableItemId) {
     const payload = { boardId, tableItemId };
@@ -164,7 +152,7 @@
 
     const selection = await miro.board.getSelection();
     if (!Array.isArray(selection) || selection.length !== 1) {
-      await notifyError("Select exactly 1 table item.");
+      await notifyError("Select exactly 1 table item (or the table object) before running.");
       return;
     }
 
@@ -174,7 +162,7 @@
       return;
     }
 
-    await notifyInfo("MCP table read started…");
+    await notifyInfo("Table → Stickies (MCP) started…");
 
     const data = await callTableMcpBackend(boardId, item.id);
 
@@ -186,7 +174,7 @@
     await notifyInfo("Table → Stickies finished.");
   }
 
-  // Subscribe MCP table custom action
+  // Custom action handler (if it shows up somewhere)
   await miro.board.ui.on(TABLE_CUSTOM_EVENT, async () => {
     try {
       await notifyInfo("Custom action fired.");
@@ -196,15 +184,9 @@
     }
   });
 
-  // Register MCP table action
-  try {
-    await miro.board.experimental.action.deregister(TABLE_MCP_EVENT);
-  } catch (e) {
-    // ignore
-  }
+  // Register MCP table action (kept, but NOT required for usage)
+  try { await miro.board.experimental.action.deregister(TABLE_MCP_EVENT); } catch (e) {}
 
-  // IMPORTANT: no predicate while debugging visibility.
-  // This ensures the menu item appears for ANY single selected item.
   await miro.board.experimental.action.register({
     event: TABLE_MCP_EVENT,
     ui: {
@@ -214,18 +196,36 @@
     },
     scope: "local",
     selection: "single",
-    contexts: {
-      item: {}
+    contexts: { item: {} }
+  });
+
+  // ============================
+  // ICON CLICK = reliable trigger for Table → Stickies (no table right-click needed)
+  // ============================
+  await miro.board.ui.on("icon:click", async () => {
+    try {
+      const selection = await miro.board.getSelection();
+      if (!Array.isArray(selection) || selection.length !== 1) {
+        await notifyInfo("Select 1 table, then click the app icon to create stickies (MCP). PDFs: right-click → Analyze OKR.");
+        return;
+      }
+
+      // If user selected a PDF document, we keep production behavior: use right-click action.
+      const item = selection[0];
+      const t = item && item.type ? String(item.type) : "unknown";
+      if (t === "document") {
+        await notifyInfo("PDF selected. Use right-click → Analyze OKR.");
+        return;
+      }
+
+      // Otherwise: try MCP table → stickies on the selected item id
+      await runTableToStickiesMcpForSelection();
+    } catch (e) {
+      await notifyError(e && e.message ? e.message : String(e));
     }
   });
 
-  // Optional: clicking the app icon does NOT open a panel (production behavior).
-  // It just tells users how to run it.
-  await miro.board.ui.on("icon:click", async () => {
-    await notifyInfo("Select PDF → right-click → Analyze OKR. | Select any item → right-click → Table → Stickies (MCP Auto).");
-  });
-
-  await notifyInfo("Ready: right-click a PDF → Analyze OKR. | right-click any item → Table → Stickies (MCP Auto).");
+  await notifyInfo("Ready: PDFs → right-click → Analyze OKR. Tables → select table → click app icon (MCP) to create stickies.");
 })();
 </script>
 </body>
