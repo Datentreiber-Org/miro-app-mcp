@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Miro → Lovable (Build with URL)</title>
+  <title>Miro → Lovable (Build with URL) + PDF→OKR</title>
   <script src="https://miro.com/app/static/sdk/v2/miro.js"></script>
 </head>
 <body>
@@ -11,6 +11,10 @@
   // ============================
   // CONFIG
   // ============================
+  const BACKEND_URL = "https://miro-app-mcp.vercel.app";
+  const MODEL = "gpt-5.2";
+
+  // --- Lovable button config ---
   const TARGET_FRAME_TITLE = "lovable"; // Frame title to scope content (case-insensitive)
   const BUTTON_MARKER = "DT_LOVABLE_BUTTON_V1";
   const BUTTON_LABEL_TEXT = "🚀 Lovable: Generate App";
@@ -21,6 +25,10 @@
   const APPDATA_FRAME_ID_KEY = "dt_lovable_frame_id_v1";
 
   let lastLaunchAt = 0;
+
+  // --- OKR Custom Action config ---
+  const OKR_ACTION_EVENT = "analyze-okr";
+  const OKR_CUSTOM_EVENT = `custom:${OKR_ACTION_EVENT}`;
 
   function truncate80(s) {
     const t = String(s || "").replace(/\s+/g, " ").trim();
@@ -35,6 +43,9 @@
     try { await miro.board.notifications.showError(truncate80(msg)); } catch (e) {}
   }
 
+  // ============================
+  // AppData helpers
+  // ============================
   async function getAppDataKey(key) {
     try {
       const v = await miro.board.getAppData(key);
@@ -65,6 +76,9 @@
     return false;
   }
 
+  // ============================
+  // Lovable: Frame + Button
+  // ============================
   function normalizeTitle(s) {
     return String(s || "").trim().toLowerCase();
   }
@@ -198,6 +212,9 @@
 
   function buildLovablePrompt(boardId) {
     const boardUrl = buildBoardUrlFromId(boardId);
+
+    // NOTE: Keep generic wrapper prompt (Lovable will pull the real spec/stickies via MCP).
+    // You can later tighten: use doc_get for Miro Docs inside frame, and only 6 stickies + 1 doc.
     return [
       "Build a web app from the following Miro board content.",
       "",
@@ -223,70 +240,120 @@
     return LOVABLE_BASE_URL + enc;
   }
 
-  async function writeLovableUrlToBoard(url, frame) {
-    // Write a clickable/copyable link as a Text item near the lovable frame.
-    const fx = frame && Number.isFinite(frame.x) ? frame.x : 0;
-    const fy = frame && Number.isFinite(frame.y) ? frame.y : 0;
-    const fw = frame && Number.isFinite(frame.width) ? frame.width : 1600;
+  async function openLovableFromBoard(boardId) {
+    const prompt = buildLovablePrompt(boardId);
+    const url = buildLovableUrl(prompt);
 
-    const x = fx + (fw / 2) + 380;
+    const frame = await findTargetFrame();
+    if (!frame) {
+      await notifyError(`Frame "${TARGET_FRAME_TITLE}" not found.`);
+      return;
+    }
+
+    // ALWAYS write to board (no popup attempts)
+    const fx = Number.isFinite(frame.x) ? frame.x : 0;
+    const fy = Number.isFinite(frame.y) ? frame.y : 0;
+    const fw = Number.isFinite(frame.width) ? frame.width : 1600;
+
+    const x = fx + (fw / 2) + 520;
     const y = fy;
 
     const html =
       `<p><strong>Lovable Launch Link</strong></p>` +
-      `<p style="font-size:12px;opacity:.85;">If popup is blocked, open this link:</p>` +
+      `<p style="font-size:12px;opacity:.85;">Click the link below to start Lovable (autosubmit):</p>` +
       `<p><a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open Lovable (autosubmit)</a></p>` +
-      `<p style="font-size:11px;opacity:.7;">(If the link is not clickable in your UI, copy the full URL below.)</p>` +
-      `<p style="font-size:10px;word-break:break-all;">${escapeHtml(url)}</p>`;
+      `<p style="font-size:10px;word-break:break-all;opacity:.7;">${escapeHtml(url)}</p>`;
+
+    const textItem = await miro.board.createText({ content: html, x, y });
 
     try {
-      await miro.board.createText({
-        content: html,
-        x,
-        y
-      });
-      await notifyInfo("Lovable URL written to board.");
+      await miro.board.viewport.zoomTo(textItem);
+    } catch (e) {}
+
+    await notifyInfo("Lovable link created on board (next to frame).");
+  }
+
+  // ============================
+  // OKR: Analyze selected PDF (kept)
+  // ============================
+  async function callOkrBackend(boardId, itemId) {
+    const payload = { boardId, itemId, model: MODEL };
+
+    const res = await fetch(`${BACKEND_URL}/api/analyze-selected-pdf`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Backend ${res.status}: ${text}`);
+
+    try {
+      return JSON.parse(text);
     } catch (e) {
-      await notifyError("Could not write Lovable URL to board: " + (e && e.message ? e.message : String(e)));
+      return { raw: text };
     }
   }
 
-async function openLovableFromBoard(boardId) {
-  const prompt = buildLovablePrompt(boardId);
-  const url = buildLovableUrl(prompt);
+  async function runOkrForCurrentSelection() {
+    const boardInfo = await miro.board.getInfo();
+    const boardId = boardInfo && boardInfo.id ? boardInfo.id : null;
+    if (!boardId) throw new Error("No boardId available.");
 
-  const frame = await findTargetFrame();
-  if (!frame) {
-    await notifyError(`Frame "${TARGET_FRAME_TITLE}" not found.`);
-    return;
+    const selection = await miro.board.getSelection();
+    if (!Array.isArray(selection) || selection.length !== 1) {
+      await notifyError("Select exactly 1 PDF document.");
+      return;
+    }
+
+    const item = selection[0];
+    if (!item || !item.id) {
+      await notifyError("Selection has no item id.");
+      return;
+    }
+
+    await notifyInfo("OKR analysis started…");
+
+    const data = await callOkrBackend(boardId, item.id);
+
+    if (data && data.createdDocId) {
+      await notifyInfo("OKR doc created on board.");
+      return;
+    }
+    if (data && data.createdTextId) {
+      await notifyInfo("OKR output created (text fallback).");
+      return;
+    }
+
+    await notifyInfo("OKR analysis finished.");
   }
 
-  // ALWAYS write to board (no popup attempts)
-  const fx = Number.isFinite(frame.x) ? frame.x : 0;
-  const fy = Number.isFinite(frame.y) ? frame.y : 0;
-  const fw = Number.isFinite(frame.width) ? frame.width : 1600;
+  await miro.board.ui.on(OKR_CUSTOM_EVENT, async () => {
+    try {
+      await runOkrForCurrentSelection();
+    } catch (e) {
+      await notifyError(e && e.message ? e.message : String(e));
+    }
+  });
 
-  const x = fx + (fw / 2) + 520;
-  const y = fy;
+  try { await miro.board.experimental.action.deregister(OKR_ACTION_EVENT); } catch (e) {}
 
-  const html =
-    `<p><strong>Lovable Launch Link</strong></p>` +
-    `<p style="font-size:12px;opacity:.85;">Click the link below to start Lovable (autosubmit):</p>` +
-    `<p><a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open Lovable (autosubmit)</a></p>` +
-    `<p style="font-size:10px;word-break:break-all;opacity:.7;">${escapeHtml(url)}</p>`;
+  await miro.board.experimental.action.register({
+    event: OKR_ACTION_EVENT,
+    ui: {
+      label: { en: "Analyze OKR" },
+      icon: "chat-two",
+      description: "Analyze selected PDF and write the OKR result to a board doc."
+    },
+    scope: "local",
+    selection: "single",
+    predicate: { type: "document" },
+    contexts: { item: {} }
+  });
 
-  const textItem = await miro.board.createText({ content: html, x, y });
-
-  try {
-    await miro.board.viewport.zoomTo(textItem);
-  } catch (e) {
-    // ignore
-  }
-
-  await notifyInfo("Lovable link created on board (next to frame).");
-}
-
-
+  // ============================
+  // Board button click (selection:update)
+  // ============================
   let selectionHandling = false;
 
   await miro.board.ui.on("selection:update", async (event) => {
@@ -327,20 +394,26 @@ async function openLovableFromBoard(boardId) {
     }
   });
 
+  // ============================
+  // Icon click (setup)
+  // ============================
   await miro.board.ui.on("icon:click", async () => {
     try {
       const btn = await ensureLovableButton();
       if (btn && btn.id) {
-        await notifyInfo(`Button ready. Click "${BUTTON_LABEL_TEXT}" on the board.`);
+        await notifyInfo(`Button ready. Click "${BUTTON_LABEL_TEXT}" on the board. PDFs: right-click → Analyze OKR.`);
       }
     } catch (e) {
       await notifyError(e && e.message ? e.message : String(e));
     }
   });
 
+  // ============================
+  // Bootstrap
+  // ============================
   try {
     await ensureLovableButton();
-    await notifyInfo(`Ready. Click the board button "${BUTTON_LABEL_TEXT}".`);
+    await notifyInfo(`Ready. Click the board button "${BUTTON_LABEL_TEXT}". PDFs: right-click → Analyze OKR.`);
   } catch (e) {
     await notifyError(e && e.message ? e.message : String(e));
   }
