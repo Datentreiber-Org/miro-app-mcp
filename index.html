@@ -251,28 +251,41 @@
     }
   }
 
-  async function openLovableFromBoard(boardId) {
-    const prompt = buildLovablePrompt(boardId);
-    const url = buildLovableUrl(prompt);
+async function openLovableFromBoard(boardId) {
+  const prompt = buildLovablePrompt(boardId);
+  const url = buildLovableUrl(prompt);
 
-    let opened = false;
-    try {
-      const w = window.open(url, "_blank", "noopener,noreferrer");
-      opened = !!w;
-    } catch (e) {
-      opened = false;
-    }
-
-    if (opened) {
-      await notifyInfo("Opening Lovable…");
-      return;
-    }
-
-    // Popup blocked → write URL to board (reliable)
-    const frame = await findTargetFrame();
-    await writeLovableUrlToBoard(url, frame);
-    await notifyError("Popup blocked. Lovable URL was written to the board.");
+  const frame = await findTargetFrame();
+  if (!frame) {
+    await notifyError(`Frame "${TARGET_FRAME_TITLE}" not found.`);
+    return;
   }
+
+  // ALWAYS write to board (no popup attempts)
+  const fx = Number.isFinite(frame.x) ? frame.x : 0;
+  const fy = Number.isFinite(frame.y) ? frame.y : 0;
+  const fw = Number.isFinite(frame.width) ? frame.width : 1600;
+
+  const x = fx + (fw / 2) + 520;
+  const y = fy;
+
+  const html =
+    `<p><strong>Lovable Launch Link</strong></p>` +
+    `<p style="font-size:12px;opacity:.85;">Click the link below to start Lovable (autosubmit):</p>` +
+    `<p><a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open Lovable (autosubmit)</a></p>` +
+    `<p style="font-size:10px;word-break:break-all;opacity:.7;">${escapeHtml(url)}</p>`;
+
+  const textItem = await miro.board.createText({ content: html, x, y });
+
+  try {
+    await miro.board.viewport.zoomTo(textItem);
+  } catch (e) {
+    // ignore
+  }
+
+  await notifyInfo("Lovable link created on board (next to frame).");
+}
+
 
   let selectionHandling = false;
 
