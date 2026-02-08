@@ -15,18 +15,13 @@
   const BUTTON_MARKER = "DT_LOVABLE_BUTTON_V1";
   const BUTTON_LABEL_TEXT = "🚀 Lovable: Generate App";
   const BUTTON_SUBTEXT = `Frame: ${TARGET_FRAME_TITLE}`;
-  const LOVABLE_BASE_URL = "https://lovable.dev/?autosubmit=true#prompt="; // Build-with-URL :contentReference[oaicite:4]{index=4}
+  const LOVABLE_BASE_URL = "https://lovable.dev/?autosubmit=true#prompt=";
 
-  // Board app data keys (persist per board)
   const APPDATA_BUTTON_ID_KEY = "dt_lovable_button_id_v1";
   const APPDATA_FRAME_ID_KEY = "dt_lovable_frame_id_v1";
 
-  // Debounce to prevent double-open
   let lastLaunchAt = 0;
 
-  // ============================
-  // Helpers: notifications
-  // ============================
   function truncate80(s) {
     const t = String(s || "").replace(/\s+/g, " ").trim();
     return t.length > 80 ? (t.slice(0, 77) + "...") : t;
@@ -40,11 +35,7 @@
     try { await miro.board.notifications.showError(truncate80(msg)); } catch (e) {}
   }
 
-  // ============================
-  // Helpers: app data
-  // ============================
   async function getAppDataKey(key) {
-    // board.getAppData("key") supported; get-all supported without args. :contentReference[oaicite:5]{index=5}
     try {
       const v = await miro.board.getAppData(key);
       return v;
@@ -74,15 +65,11 @@
     return false;
   }
 
-  // ============================
-  // Find frame by title
-  // ============================
   function normalizeTitle(s) {
     return String(s || "").trim().toLowerCase();
   }
 
   async function findTargetFrame() {
-    // Get frames via Web SDK get by type. :contentReference[oaicite:6]{index=6}
     const frames = await miro.board.get({ type: ["frame"] });
     const wanted = normalizeTitle(TARGET_FRAME_TITLE);
 
@@ -95,9 +82,6 @@
     return null;
   }
 
-  // ============================
-  // Ensure board button exists (shape)
-  // ============================
   function shapeHasMarker(shape) {
     const content = String(shape && shape.content ? shape.content : "");
     return content.indexOf(BUTTON_MARKER) !== -1;
@@ -108,20 +92,19 @@
     return content.indexOf("lovable") !== -1 && content.indexOf("generate") !== -1;
   }
 
-  function toHtmlButtonContent() {
-    // Keep a hidden marker so we can re-find it reliably
-    return (
-      `<p><strong>${escapeHtml(BUTTON_LABEL_TEXT)}</strong></p>` +
-      `<p style="font-size:12px;opacity:.8;">${escapeHtml(BUTTON_SUBTEXT)}</p>` +
-      `<p style="font-size:10px;opacity:.01;">${BUTTON_MARKER}</p>`
-    );
-  }
-
   function escapeHtml(s) {
     return String(s || "")
       .replaceAll("&", "&amp;")
       .replaceAll("<", "&lt;")
       .replaceAll(">", "&gt;");
+  }
+
+  function toHtmlButtonContent() {
+    return (
+      `<p><strong>${escapeHtml(BUTTON_LABEL_TEXT)}</strong></p>` +
+      `<p style="font-size:12px;opacity:.8;">${escapeHtml(BUTTON_SUBTEXT)}</p>` +
+      `<p style="font-size:10px;opacity:.01;">${BUTTON_MARKER}</p>`
+    );
   }
 
   async function getShapeById(id) {
@@ -135,20 +118,17 @@
   }
 
   async function findExistingButtonShape() {
-    // First: appData id
     const savedId = await getAppDataKey(APPDATA_BUTTON_ID_KEY);
     if (savedId) {
       const item = await getShapeById(savedId);
       if (item && item.type === "shape") return item;
     }
 
-    // Second: search shapes for marker
     const shapes = await miro.board.get({ type: ["shape"] });
     if (Array.isArray(shapes)) {
       for (const s of shapes) {
         if (shapeHasMarker(s)) return s;
       }
-      // Fallback heuristic
       for (const s of shapes) {
         if (shapeLooksLikeButton(s)) return s;
       }
@@ -163,13 +143,10 @@
       return null;
     }
 
-    // Remember frame id
     await setAppDataKey(APPDATA_FRAME_ID_KEY, frame.id);
 
-    // Button exists?
     const existing = await findExistingButtonShape();
     if (existing && existing.type === "shape") {
-      // Try to keep it inside frame (best-effort)
       try {
         if (typeof frame.add === "function") {
           await frame.add(existing);
@@ -180,7 +157,6 @@
       return existing;
     }
 
-    // Create new shape button near top-right inside the frame
     const fx = Number.isFinite(frame.x) ? frame.x : 0;
     const fy = Number.isFinite(frame.y) ? frame.y : 0;
     const fw = Number.isFinite(frame.width) ? frame.width : 1600;
@@ -189,7 +165,6 @@
     const btnW = 340;
     const btnH = 120;
 
-    // frame coordinates are board-level; place inside frame
     const bx = fx + (fw / 2) - (btnW / 2) - 40;
     const by = fy - (fh / 2) + (btnH / 2) + 40;
 
@@ -202,7 +177,6 @@
       height: btnH
     });
 
-    // Add to frame so it moves with it
     try {
       if (btn && typeof frame.add === "function") {
         await frame.add(btn);
@@ -217,21 +191,13 @@
     return btn;
   }
 
-  // ============================
-  // Build Lovable prompt (MCP pull from Miro)
-  // ============================
   function buildBoardUrlFromId(boardId) {
-    // Web SDK v2 getInfo is "bare" (id only). :contentReference[oaicite:7]{index=7}
-    // We construct a standard board URL. If your org uses a different domain, Lovable can still use boardId in MCP tools.
     const encoded = encodeURIComponent(String(boardId || ""));
     return `https://miro.com/app/board/${encoded}/`;
   }
 
   function buildLovablePrompt(boardId) {
     const boardUrl = buildBoardUrlFromId(boardId);
-
-    // Keep prompt concise (Lovable prompt max 50k; long URLs may fail). :contentReference[oaicite:8]{index=8}
-    // MCP tools: context_explore, board_list_items (filter by parent), context_get (Docs -> HTML). :contentReference[oaicite:9]{index=9}
     return [
       "Build a web app from the following Miro board content.",
       "",
@@ -242,7 +208,7 @@
       "MCP procedure (strict):",
       "1) Call context_explore on the board. Find the frame whose title matches the scope title and capture its item id + url.",
       "2) Call board_list_items with a parent container filter set to that frame id. Include item types: document, sticky_note, text.",
-      "3) For each document in that frame: call context_get to extract full HTML (treat as product/spec/prompt).",
+      "3) For each document in that frame: call context_get to extract full HTML (treat as spec/prompt).",
       "4) For sticky notes: use their text/content as requirements, features, constraints, user stories.",
       "",
       "Deliverable:",
@@ -257,11 +223,38 @@
     return LOVABLE_BASE_URL + enc;
   }
 
+  async function writeLovableUrlToBoard(url, frame) {
+    // Write a clickable/copyable link as a Text item near the lovable frame.
+    const fx = frame && Number.isFinite(frame.x) ? frame.x : 0;
+    const fy = frame && Number.isFinite(frame.y) ? frame.y : 0;
+    const fw = frame && Number.isFinite(frame.width) ? frame.width : 1600;
+
+    const x = fx + (fw / 2) + 380;
+    const y = fy;
+
+    const html =
+      `<p><strong>Lovable Launch Link</strong></p>` +
+      `<p style="font-size:12px;opacity:.85;">If popup is blocked, open this link:</p>` +
+      `<p><a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open Lovable (autosubmit)</a></p>` +
+      `<p style="font-size:11px;opacity:.7;">(If the link is not clickable in your UI, copy the full URL below.)</p>` +
+      `<p style="font-size:10px;word-break:break-all;">${escapeHtml(url)}</p>`;
+
+    try {
+      await miro.board.createText({
+        content: html,
+        x,
+        y
+      });
+      await notifyInfo("Lovable URL written to board.");
+    } catch (e) {
+      await notifyError("Could not write Lovable URL to board: " + (e && e.message ? e.message : String(e)));
+    }
+  }
+
   async function openLovableFromBoard(boardId) {
     const prompt = buildLovablePrompt(boardId);
     const url = buildLovableUrl(prompt);
 
-    // Try to open in new tab. If blocked, copy to clipboard and notify.
     let opened = false;
     try {
       const w = window.open(url, "_blank", "noopener,noreferrer");
@@ -270,24 +263,17 @@
       opened = false;
     }
 
-    if (!opened) {
-      try {
-        await navigator.clipboard.writeText(url);
-        await notifyInfo("Lovable URL copied to clipboard (paste into browser).");
-        return;
-      } catch (e) {
-        // last fallback: notify shortened
-        await notifyError("Popup blocked and clipboard unavailable. Open Lovable manually from the app logs.");
-        return;
-      }
+    if (opened) {
+      await notifyInfo("Opening Lovable…");
+      return;
     }
 
-    await notifyInfo("Opening Lovable…");
+    // Popup blocked → write URL to board (reliable)
+    const frame = await findTargetFrame();
+    await writeLovableUrlToBoard(url, frame);
+    await notifyError("Popup blocked. Lovable URL was written to the board.");
   }
 
-  // ============================
-  // Trigger: click the board button (selection:update)
-  // ============================
   let selectionHandling = false;
 
   await miro.board.ui.on("selection:update", async (event) => {
@@ -322,18 +308,13 @@
 
       await openLovableFromBoard(boardId);
 
-      // Optional: deselect to avoid accidental re-trigger
       try { await miro.board.deselect(selected.id); } catch (e) {}
     } finally {
       selectionHandling = false;
     }
-  }); // :contentReference[oaicite:10]{index=10}
+  });
 
-  // ============================
-  // Trigger: icon click (setup + fallback launch)
-  // ============================
   await miro.board.ui.on("icon:click", async () => {
-    // icon:click is dispatched only to headless/main iframe :contentReference[oaicite:11]{index=11}
     try {
       const btn = await ensureLovableButton();
       if (btn && btn.id) {
@@ -344,9 +325,6 @@
     }
   });
 
-  // ============================
-  // Bootstrap: try to ensure button exists on load
-  // ============================
   try {
     await ensureLovableButton();
     await notifyInfo(`Ready. Click the board button "${BUTTON_LABEL_TEXT}".`);
