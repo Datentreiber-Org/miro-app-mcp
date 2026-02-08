@@ -210,28 +210,33 @@
     return `https://miro.com/app/board/${encoded}/`;
   }
 
+  // ============================
+  // Wrapper prompt (UPDATED as requested)
+  // ============================
   function buildLovablePrompt(boardId) {
     const boardUrl = buildBoardUrlFromId(boardId);
 
-    // NOTE: Keep generic wrapper prompt (Lovable will pull the real spec/stickies via MCP).
-    // You can later tighten: use doc_get for Miro Docs inside frame, and only 6 stickies + 1 doc.
     return [
-      "Build a web app from the following Miro board content.",
-      "",
-      "Miro MCP is connected in this Lovable workspace.",
+      `Build a web app using ONLY the content inside the frame titled "${TARGET_FRAME_TITLE}" (case-insensitive) on this Miro board.`,
+      ``,
+      `Miro MCP is connected in this Lovable workspace.`,
       `Board URL: ${boardUrl}`,
-      `Scope: ONLY content inside the frame titled "${TARGET_FRAME_TITLE}" (case-insensitive). Ignore everything else.`,
-      "",
-      "MCP procedure (strict):",
-      "1) Call context_explore on the board. Find the frame whose title matches the scope title and capture its item id + url.",
-      "2) Call board_list_items with a parent container filter set to that frame id. Include item types: document, sticky_note, text.",
-      "3) For each document in that frame: call context_get to extract full HTML (treat as spec/prompt).",
-      "4) For sticky notes: use their text/content as requirements, features, constraints, user stories.",
-      "",
-      "Deliverable:",
-      "- Generate the application in Lovable end-to-end.",
-      "- Prefer a simple, working MVP architecture first.",
-      "- Keep requirements traceable: mention the Miro doc/sticky ids you used when translating into features."
+      `Scope: ONLY content inside the frame titled "${TARGET_FRAME_TITLE}". Ignore everything else.`,
+      ``,
+      `MCP procedure (strict):`,
+      `1) Call context_explore on the board. Find the frame whose title matches "${TARGET_FRAME_TITLE}" and capture its item id.`,
+      `2) Call board_list_items filtered to that frame as parent/container. Only include: doc, sticky_note, text.`,
+      `3) Inside that frame, find EXACTLY ONE Miro Doc (doc-format). Call doc_get on that doc.`,
+      `   - Treat the returned markdown as the MASTER SPEC and follow it verbatim.`,
+      `   - Do not reinterpret or paraphrase it; implement it.`,
+      `4) Collect ALL sticky_note texts inside that same frame (expected: 6).`,
+      `   - Treat them as additional requirements / selected inputs.`,
+      `   - If the master spec contains a placeholder for "CRITERIA_SUBSET_JSON", fill it best-effort using exactly those 6 sticky texts.`,
+      `5) Build the app end-to-end in Lovable (MVP first), strictly based on the master spec + those 6 stickies.`,
+      ``,
+      `Deliverable:`,
+      `- Generate the full working mini-app in Lovable.`,
+      `- Keep requirements traceable: reference the Miro doc id and sticky ids you used.`
     ].join("\n");
   }
 
