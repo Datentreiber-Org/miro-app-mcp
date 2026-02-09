@@ -396,6 +396,44 @@ async function findDocFormatByTitle(boardId, token, exactTitle) {
   const wanted = String(exactTitle || "").trim();
   if (!wanted) return null;
 
+  function stripHtmlTags(s) {
+    return String(s || "").replace(/<[^>]*>/g, "");
+  }
+
+  function extractDocFormatTitleFromContent(docObj) {
+    if (!docObj || typeof docObj !== "object") return "";
+
+    // If Miro ever adds a real title field here, prefer it.
+    const t = extractItemTitle(docObj);
+    if (t) return t;
+
+    const data = docObj.data && typeof docObj.data === "object" ? docObj.data : {};
+    const content = (typeof data.content === "string" && data.content.trim()) ? data.content : "";
+    if (!content) return "";
+
+    const lines = content.split(/\r?\n/);
+    for (const line of lines) {
+      const l = String(line || "").trim();
+      if (!l) continue;
+
+      // Markdown title pattern: "# Title"
+      const m = l.match(/^#{1,6}\s+(.*)$/);
+      if (m && m[1] && m[1].trim()) return m[1].trim();
+
+      // HTML title pattern: <h1>Title</h1>
+      const h1 = l.match(/<h1[^>]*>(.*?)<\/h1>/i);
+      if (h1 && h1[1]) {
+        const txt = stripHtmlTags(h1[1]).trim();
+        if (txt) return txt;
+      }
+
+      // Fallback: first non-empty line, stripped
+      return stripHtmlTags(l).trim();
+    }
+
+    return "";
+  }
+
   let cursor = null;
   // Hard cap to avoid accidental infinite loops in case pagination behaves unexpectedly.
   for (let i = 0; i < 100; i++) {
@@ -410,9 +448,33 @@ async function findDocFormatByTitle(boardId, token, exactTitle) {
     for (const it of items) {
       if (!it || typeof it !== "object") continue;
       if (String(it.type || "") !== "doc_format") continue;
+      if (!it.id) continue;
 
-      const title = extractItemTitle(it);
-      if (title === wanted) return it;
+      // Fast path: if listing already includes a title-like field.
+      const listTitle = extractItemTitle(it);
+      if (listTitle === wanted) {
+        try {
+          const details = await miroGetJson(
+            `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/docs/${encodeURIComponent(it.id)}`,
+            token
+          );
+          return details || it;
+        } catch {
+          return it;
+        }
+      }
+
+      // Robust path: derive "title" from doc content (first H1 / first non-empty line).
+      try {
+        const details = await miroGetJson(
+          `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/docs/${encodeURIComponent(it.id)}`,
+          token
+        );
+        const derived = extractDocFormatTitleFromContent(details);
+        if (derived === wanted) return details;
+      } catch {
+        // ignore and continue scanning
+      }
     }
 
     const nextCursor = extractNextCursor(page);
@@ -422,6 +484,7 @@ async function findDocFormatByTitle(boardId, token, exactTitle) {
 
   return null;
 }
+
 
 function normalizeMarkdown(s) {
   if (typeof s !== "string") return "";
