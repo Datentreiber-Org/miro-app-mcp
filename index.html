@@ -1,97 +1,94 @@
 <!doctype html>
-<html lang="en">
+<html>
 <head>
   <meta charset="utf-8" />
-  <title>Miro → Lovable (Build with URL) + PDF→OKR</title>
+  <title>Miro App MCP Demo</title>
   <script src="https://miro.com/app/static/sdk/v2/miro.js"></script>
+  <style>
+    body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; }
+    .row { margin-bottom: 12px; }
+    button { padding: 10px 12px; border: 0; border-radius: 8px; cursor: pointer; }
+    button.primary { background: #4262ff; color: #fff; }
+    button.secondary { background: #e6e8ff; color: #1b1f3b; }
+    .hint { font-size: 12px; opacity: .75; }
+    code { background: #f3f4f6; padding: 2px 6px; border-radius: 6px; }
+  </style>
 </head>
 <body>
+  <h2>Miro App MCP Demo</h2>
+
+  <div class="row">
+    <button id="btnAnalyze" class="primary">Analyze OKR from selected PDF</button>
+    <div class="hint">Select a PDF on the board, then click.</div>
+  </div>
+
+  <div class="row">
+    <button id="btnTable" class="secondary">Table → Stickies (via MCP)</button>
+    <div class="hint">Select a table-like area (or keep default) and run.</div>
+  </div>
+
 <script>
-(async function init() {
+(async () => {
   // ============================
-  // CONFIG
+  // Config
   // ============================
-  const BACKEND_URL = "https://miro-app-mcp.vercel.app";
+  const BACKEND_URL = ""; // same origin
   const MODEL = "gpt-5.2";
 
-  // --- Lovable button config ---
-  const TARGET_FRAME_TITLE = "lovable"; // Frame title to scope content (case-insensitive)
-  const BUTTON_MARKER = "DT_LOVABLE_BUTTON_V1";
-  const BUTTON_LABEL_TEXT = "🚀 Lovable: Generate App";
-  const BUTTON_SUBTEXT = `Frame: ${TARGET_FRAME_TITLE}`;
+  // Lovable config
+  const TARGET_FRAME_TITLE = "lovable"; // case-insensitive match
   const LOVABLE_BASE_URL = "https://lovable.dev/?autosubmit=true#prompt=";
 
-  const APPDATA_BUTTON_ID_KEY = "dt_lovable_button_id_v1";
-  const APPDATA_FRAME_ID_KEY = "dt_lovable_frame_id_v1";
+  // Board Button config
+  const APPDATA_BUTTON_ID_KEY = "lovableButtonShapeId";
+  const APPDATA_FRAME_ID_KEY = "lovableFrameId";
+  const BUTTON_MARKER = "[[LOVABLE_BUTTON]]";
+  const BUTTON_LABEL_TEXT = "🚀 Lovable: Generate App";
+  const BUTTON_SUBTEXT = `Click to open Lovable with this board + frame "${TARGET_FRAME_TITLE}"`;
 
-  let lastLaunchAt = 0;
-
-  // --- OKR Custom Action config ---
-  const OKR_ACTION_EVENT = "analyze-okr";
-  const OKR_CUSTOM_EVENT = `custom:${OKR_ACTION_EVENT}`;
-
-  function truncate80(s) {
-    const t = String(s || "").replace(/\s+/g, " ").trim();
-    return t.length > 80 ? (t.slice(0, 77) + "...") : t;
-  }
-
+  // ============================
+  // Helpers
+  // ============================
   async function notifyInfo(msg) {
-    try { await miro.board.notifications.showInfo(truncate80(msg)); } catch (e) {}
+    try { await miro.board.notifications.showInfo(msg); } catch (e) {}
   }
-
   async function notifyError(msg) {
-    try { await miro.board.notifications.showError(truncate80(msg)); } catch (e) {}
+    try { await miro.board.notifications.showError(msg); } catch (e) {}
   }
 
-  // ============================
-  // AppData helpers
-  // ============================
   async function getAppDataKey(key) {
     try {
-      const v = await miro.board.getAppData(key);
-      return v;
-    } catch (e1) {
-      try {
-        const all = await miro.board.getAppData();
-        if (all && typeof all === "object") {
-          return all[key];
-        }
-      } catch (e2) {}
+      const val = await miro.board.getAppData(key);
+      return val || null;
+    } catch (e) {
+      return null;
     }
-    return undefined;
   }
 
-  async function setAppDataKey(key, value) {
+  async function setAppDataKey(key, val) {
     try {
-      await miro.board.setAppData(key, value);
-      return true;
-    } catch (e1) {
-      try {
-        const obj = {};
-        obj[key] = value;
-        await miro.board.setAppData(obj);
-        return true;
-      } catch (e2) {}
-    }
-    return false;
+      await miro.board.setAppData(key, String(val));
+    } catch (e) {}
   }
 
-  // ============================
-  // Lovable: Frame + Button
-  // ============================
   function normalizeTitle(s) {
     return String(s || "").trim().toLowerCase();
   }
 
   async function findTargetFrame() {
-    const frames = await miro.board.get({ type: ["frame"] });
-    const wanted = normalizeTitle(TARGET_FRAME_TITLE);
+    // Prefer saved id first
+    const saved = await getAppDataKey(APPDATA_FRAME_ID_KEY);
+    if (saved) {
+      try {
+        const f = await miro.board.get({ id: saved });
+        if (Array.isArray(f) && f.length && f[0].type === "frame") return f[0];
+      } catch (e) {}
+    }
 
-    if (Array.isArray(frames)) {
-      for (const f of frames) {
-        const t = normalizeTitle(f && f.title);
-        if (t === wanted) return f;
-      }
+    // else find by title
+    const frames = await miro.board.get({ type: ["frame"] });
+    for (const f of frames || []) {
+      if (normalizeTitle(f.title) === normalizeTitle(TARGET_FRAME_TITLE)) return f;
     }
     return null;
   }
@@ -113,9 +110,20 @@
       .replaceAll(">", "&gt;");
   }
 
-  function toHtmlButtonContent() {
+  function toHtmlButtonContent(boardId) {
+    const prompt = buildLovablePrompt(boardId);
+    const url = buildLovableUrl(prompt);
+
+    // Make the button label a real hyperlink.
+    // This improves reliability for collaborators because the link is a normal Miro hyperlink
+    // (does not depend on the app runtime / events).
+    const linkLabel =
+      `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;color:inherit;">` +
+      `${escapeHtml(BUTTON_LABEL_TEXT)}` +
+      `</a>`;
+
     return (
-      `<p><strong>${escapeHtml(BUTTON_LABEL_TEXT)}</strong></p>` +
+      `<p><strong>${linkLabel}</strong></p>` +
       `<p style="font-size:12px;opacity:.8;">${escapeHtml(BUTTON_SUBTEXT)}</p>` +
       `<p style="font-size:10px;opacity:.01;">${BUTTON_MARKER}</p>`
     );
@@ -138,19 +146,24 @@
       if (item && item.type === "shape") return item;
     }
 
+    // Fallback: scan shapes
     const shapes = await miro.board.get({ type: ["shape"] });
-    if (Array.isArray(shapes)) {
-      for (const s of shapes) {
-        if (shapeHasMarker(s)) return s;
-      }
-      for (const s of shapes) {
-        if (shapeLooksLikeButton(s)) return s;
-      }
+    for (const s of shapes || []) {
+      if (shapeHasMarker(s)) return s;
+    }
+    for (const s of shapes || []) {
+      if (shapeLooksLikeButton(s)) return s;
     }
     return null;
   }
 
+  // ============================
+  // Ensure button exists in frame
+  // ============================
   async function ensureLovableButton() {
+    const info = await miro.board.getInfo();
+    const boardId = info && info.id ? info.id : null;
+
     const frame = await findTargetFrame();
     if (!frame) {
       await notifyError(`Frame "${TARGET_FRAME_TITLE}" not found. Create a frame titled "${TARGET_FRAME_TITLE}".`);
@@ -159,8 +172,17 @@
 
     await setAppDataKey(APPDATA_FRAME_ID_KEY, frame.id);
 
+    const desiredContent = toHtmlButtonContent(boardId);
+
     const existing = await findExistingButtonShape();
     if (existing && existing.type === "shape") {
+      try {
+        // Keep content up to date (including the hyperlink).
+        if (typeof desiredContent === "string" && desiredContent && existing.content !== desiredContent) {
+          existing.content = desiredContent;
+          if (typeof existing.sync === "function") await existing.sync();
+        }
+      } catch (e) {}
       try {
         if (typeof frame.add === "function") {
           await frame.add(existing);
@@ -183,7 +205,7 @@
     const by = fy - (fh / 2) + (btnH / 2) + 40;
 
     const btn = await miro.board.createShape({
-      content: toHtmlButtonContent(),
+      content: desiredContent,
       shape: "round_rectangle",
       x: bx,
       y: by,
@@ -255,27 +277,63 @@
       return;
     }
 
-    // ALWAYS write to board (no popup attempts)
+    // Place the link inside the Lovable frame, right next to the Lovable button.
+    // Keep the text clean (no raw URL rendering).
+    let btn = await findExistingButtonShape();
+    if (!btn) {
+      btn = await ensureLovableButton();
+    }
+    if (!btn) {
+      await notifyError("Lovable button not found.");
+      return;
+    }
+
     const fx = Number.isFinite(frame.x) ? frame.x : 0;
     const fy = Number.isFinite(frame.y) ? frame.y : 0;
     const fw = Number.isFinite(frame.width) ? frame.width : 1600;
+    const fh = Number.isFinite(frame.height) ? frame.height : 900;
 
-    const x = fx + (fw / 2) + 520;
-    const y = fy;
+    const bx = Number.isFinite(btn.x) ? btn.x : fx;
+    const by = Number.isFinite(btn.y) ? btn.y : fy;
+    const bw = Number.isFinite(btn.width) ? btn.width : 340;
+
+    const textW = 420;
+    const pad = 40;
+    const gapX = 30;
+
+    let x = bx + (bw / 2) + gapX + (textW / 2);
+    let y = by;
+
+    // Clamp inside the frame bounds.
+    const left = fx - (fw / 2);
+    const right = fx + (fw / 2);
+    const top = fy - (fh / 2);
+    const bottom = fy + (fh / 2);
+
+    x = Math.max(left + (textW / 2) + pad, Math.min(x, right - (textW / 2) - pad));
+    y = Math.max(top + pad, Math.min(y, bottom - pad));
 
     const html =
-      `<p><strong>Lovable Launch Link</strong></p>` +
-      `<p style="font-size:12px;opacity:.85;">Click the link below to start Lovable (autosubmit):</p>` +
-      `<p><a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open Lovable (autosubmit)</a></p>` +
-      `<p style="font-size:10px;word-break:break-all;opacity:.7;">${escapeHtml(url)}</p>`;
+      `<p>` +
+      `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">` +
+      `<strong>Open Lovable (autosubmit)</strong>` +
+      `</a>` +
+      `</p>`;
 
-    const textItem = await miro.board.createText({ content: html, x, y });
+    const textItem = await miro.board.createText({ content: html, x, y, width: textW });
+
+    try {
+      if (textItem && typeof frame.add === "function") {
+        await frame.add(textItem);
+        if (typeof frame.sync === "function") await frame.sync();
+      }
+    } catch (e) {}
 
     try {
       await miro.board.viewport.zoomTo(textItem);
     } catch (e) {}
 
-    await notifyInfo("Lovable link created on board (next to frame).");
+    await notifyInfo("Lovable link created next to the button.");
   }
 
   // ============================
@@ -300,89 +358,117 @@
     }
   }
 
-  async function runOkrForCurrentSelection() {
-    const boardInfo = await miro.board.getInfo();
-    const boardId = boardInfo && boardInfo.id ? boardInfo.id : null;
-    if (!boardId) throw new Error("No boardId available.");
-
-    const selection = await miro.board.getSelection();
-    if (!Array.isArray(selection) || selection.length !== 1) {
-      await notifyError("Select exactly 1 PDF document.");
-      return;
-    }
-
-    const item = selection[0];
-    if (!item || !item.id) {
-      await notifyError("Selection has no item id.");
-      return;
-    }
-
-    await notifyInfo("OKR analysis started…");
-
-    const data = await callOkrBackend(boardId, item.id);
-
-    if (data && data.createdDocId) {
-      await notifyInfo("OKR doc created on board.");
-      return;
-    }
-    if (data && data.createdTextId) {
-      await notifyInfo("OKR output created (text fallback).");
-      return;
-    }
-
-    await notifyInfo("OKR analysis finished.");
+  async function getSelectedDocumentItem() {
+    const sel = await miro.board.getSelection();
+    if (!sel || !sel.items || !sel.items.length) return null;
+    const it = sel.items[0];
+    if (it.type === "document") return it;
+    return null;
   }
 
-  await miro.board.ui.on(OKR_CUSTOM_EVENT, async () => {
+  // Toolbar button
+  document.getElementById("btnAnalyze").addEventListener("click", async () => {
     try {
-      await runOkrForCurrentSelection();
+      const info = await miro.board.getInfo();
+      const boardId = info && info.id ? info.id : null;
+      if (!boardId) throw new Error("No boardId");
+
+      const selected = await getSelectedDocumentItem();
+      if (!selected) {
+        await notifyError("Select a PDF Document item first.");
+        return;
+      }
+
+      await notifyInfo("Analyzing PDF… (server call)");
+      const result = await callOkrBackend(boardId, selected.id);
+
+      if (result && result.createdDocId) {
+        await notifyInfo(`OKR Doc created: ${result.createdDocId}`);
+      } else if (result && result.createdTextId) {
+        await notifyInfo(`Doc creation failed; text created: ${result.createdTextId}`);
+      } else {
+        await notifyInfo("Done.");
+      }
     } catch (e) {
       await notifyError(e && e.message ? e.message : String(e));
     }
   });
 
-  try { await miro.board.experimental.action.deregister(OKR_ACTION_EVENT); } catch (e) {}
+  // ============================
+  // Table → Stickies (kept)
+  // ============================
+  document.getElementById("btnTable").addEventListener("click", async () => {
+    try {
+      const info = await miro.board.getInfo();
+      const boardId = info && info.id ? info.id : null;
+      if (!boardId) throw new Error("No boardId");
 
-  await miro.board.experimental.action.register({
-    event: OKR_ACTION_EVENT,
-    ui: {
-      label: { en: "Analyze OKR" },
-      icon: "chat-two",
-      description: "Analyze selected PDF and write the OKR result to a board doc."
-    },
-    scope: "local",
-    selection: "single",
-    predicate: { type: "document" },
-    contexts: { item: {} }
+      await notifyInfo("Calling table-to-stickies backend…");
+      const res = await fetch(`${BACKEND_URL}/api/table-to-stickies-mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ boardId })
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(`Backend ${res.status}: ${text}`);
+
+      await notifyInfo("Stickies created.");
+    } catch (e) {
+      await notifyError(e && e.message ? e.message : String(e));
+    }
   });
 
   // ============================
-  // Board button click (selection:update)
+  // Right-click action for PDFs (kept)
+  // ============================
+  miro.board.experimental.action.register("analyze-okrs", async () => {
+    const info = await miro.board.getInfo();
+    const boardId = info && info.id ? info.id : null;
+    if (!boardId) {
+      await notifyError("No boardId");
+      return;
+    }
+    const selected = await getSelectedDocumentItem();
+    if (!selected) {
+      await notifyError("Select a PDF Document item first.");
+      return;
+    }
+
+    await notifyInfo("Analyzing PDF… (server call)");
+    try {
+      const result = await callOkrBackend(boardId, selected.id);
+      if (result && result.createdDocId) {
+        await notifyInfo(`OKR Doc created: ${result.createdDocId}`);
+      } else if (result && result.createdTextId) {
+        await notifyInfo(`Doc creation failed; text created: ${result.createdTextId}`);
+      } else {
+        await notifyInfo("Done.");
+      }
+    } catch (e) {
+      await notifyError(e && e.message ? e.message : String(e));
+    }
+  });
+
+  // ============================
+  // Selection click on Lovable shape
   // ============================
   let selectionHandling = false;
 
-  await miro.board.ui.on("selection:update", async (event) => {
+  miro.board.ui.on("selection:update", async (evt) => {
     if (selectionHandling) return;
     selectionHandling = true;
-
     try {
-      const items = event && Array.isArray(event.items) ? event.items : [];
-      if (items.length !== 1) return;
+      const items = evt && evt.items ? evt.items : [];
+      if (!items.length) return;
 
       const selected = items[0];
       if (!selected || selected.type !== "shape") return;
 
-      const btnId = await getAppDataKey(APPDATA_BUTTON_ID_KEY);
-      const isOurButton =
-        (btnId && selected.id === btnId) ||
-        shapeHasMarker(selected) ||
-        shapeLooksLikeButton(selected);
+      // Make sure we are matching our button
+      const full = await getShapeById(selected.id);
+      if (!full) return;
 
-      if (!isOurButton) return;
-
-      const now = Date.now();
-      if (now - lastLaunchAt < 2500) return;
-      lastLaunchAt = now;
+      if (!shapeHasMarker(full) && !shapeLooksLikeButton(full)) return;
 
       const info = await miro.board.getInfo();
       const boardId = info && info.id ? info.id : null;
