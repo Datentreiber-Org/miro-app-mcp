@@ -41,6 +41,10 @@ const DEFAULT_OKR_PROMPT = [
   "Continue up to O9 max (5–9 objectives total; 3–5 KRs per objective)."
 ].join("\n");
 
+// The OKR output must be written into the existing doc format item on the board.
+// The doc must be found by this exact title.
+const TARGET_DOC_TITLE = "Objectives and Key Results Catalog";
+
 export default async function handler(req, res) {
   // --- Quick & Dirty CORS ---
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -156,47 +160,95 @@ export default async function handler(req, res) {
     let answer = await openaiAnalyzePdf(effectiveOpenaiKey, effectiveModel, effectivePrompt, fileMeta.id);
     answer = normalizeMarkdown(answer);
 
-    // 5) Create Miro Doc Format Item correctly (Doc Formats OpenAPI: data.contentType + data.content)
-    // No title field exists; put the title into markdown content.
+    // 5) Write result into an existing, pre-positioned Miro Doc Format item.
+    // As there is no REST "update doc format content" endpoint, we recreate the doc at the same
+    // position (and best-effort geometry/parent), then delete the old placeholder.
     const docMarkdown =
       `# OKR Catalog — ${escapeMdInline(pdfTitleRaw)}\n\n` +
       answer;
 
+    const targetDoc = await findDocFormatByTitle(boardId, MIRO_ACCESS_TOKEN, TARGET_DOC_TITLE);
+    if (!targetDoc || !targetDoc.id) {
+      res.status(404).send(`Target doc format item not found. Expected an existing doc titled "${TARGET_DOC_TITLE}".`);
+      return;
+    }
+
+    const targetPos =
+      (targetDoc.position && typeof targetDoc.position.x === "number" && typeof targetDoc.position.y === "number")
+        ? targetDoc.position
+        : { x: outX, y: outY, origin: "center" };
+
+    const targetGeom =
+      (targetDoc.geometry && typeof targetDoc.geometry === "object")
+        ? targetDoc.geometry
+        : null;
+
+    const targetParentId =
+      (targetDoc.parent && typeof targetDoc.parent.id === "string" && targetDoc.parent.id)
+        ? targetDoc.parent.id
+        : (targetDoc.parent && typeof targetDoc.parent.id === "number")
+          ? String(targetDoc.parent.id)
+          : null;
+
+    const createPos = {
+      x: targetPos.x,
+      y: targetPos.y,
+      origin: (targetPos && typeof targetPos.origin === "string" && targetPos.origin) ? targetPos.origin : "center"
+    };
+
+    const docMarkdownWithTitleHeading = `# ${TARGET_DOC_TITLE}\n\n${docMarkdown}`;
+
     let createdDocId = null;
     let createdTextId = null;
     const docCreateErrors = [];
+    let replacedDocId = null;
 
-    // Variant A: markdown
-    try {
-      const created = await miroPostJson(
-        `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/docs`,
-        MIRO_ACCESS_TOKEN,
-        {
-          data: {
-            contentType: "markdown",
-            content: docMarkdown
-          },
-          position: { x: outX, y: outY, origin: "center" }
+    const createVariants = [
+      // Prefer setting the doc title explicitly (if supported by the endpoint).
+      { contentType: "markdown", content: docMarkdown, includeTitle: true, includeGeometry: true },
+      { contentType: "markdown", content: docMarkdown, includeTitle: true, includeGeometry: false },
+
+      // Fallback: if title is not supported, force the title via the first heading.
+      { contentType: "markdown", content: docMarkdownWithTitleHeading, includeTitle: false, includeGeometry: true },
+      { contentType: "markdown", content: docMarkdownWithTitleHeading, includeTitle: false, includeGeometry: false },
+
+      // HTML fallbacks.
+      { contentType: "html", content: toSimpleHtml(docMarkdown), includeTitle: true, includeGeometry: true },
+      { contentType: "html", content: toSimpleHtml(docMarkdown), includeTitle: true, includeGeometry: false },
+      { contentType: "html", content: toSimpleHtml(docMarkdownWithTitleHeading), includeTitle: false, includeGeometry: true },
+      { contentType: "html", content: toSimpleHtml(docMarkdownWithTitleHeading), includeTitle: false, includeGeometry: false }
+    ];
+
+    for (const v of createVariants) {
+      if (createdDocId) break;
+
+      const payload = {
+        data: {
+          contentType: v.contentType,
+          content: v.content
+        },
+        position: createPos
+      };
+
+      if (v.includeTitle) {
+        payload.data.title = TARGET_DOC_TITLE;
+      }
+
+      if (v.includeGeometry && targetGeom) {
+        const w = (typeof targetGeom.width === "number" && Number.isFinite(targetGeom.width)) ? targetGeom.width : null;
+        const h = (typeof targetGeom.height === "number" && Number.isFinite(targetGeom.height)) ? targetGeom.height : null;
+        if (w !== null || h !== null) {
+          payload.geometry = {};
+          if (w !== null) payload.geometry.width = w;
+          if (h !== null) payload.geometry.height = h;
         }
-      );
-      createdDocId = created && created.id ? String(created.id) : null;
-    } catch (e) {
-      docCreateErrors.push(e && e.message ? e.message : String(e));
-    }
+      }
 
-    // Variant B: html (fallback)
-    if (!createdDocId) {
       try {
         const created = await miroPostJson(
           `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/docs`,
           MIRO_ACCESS_TOKEN,
-          {
-            data: {
-              contentType: "html",
-              content: toSimpleHtml(docMarkdown)
-            },
-            position: { x: outX, y: outY, origin: "center" }
-          }
+          payload
         );
         createdDocId = created && created.id ? String(created.id) : null;
       } catch (e) {
@@ -204,13 +256,39 @@ export default async function handler(req, res) {
       }
     }
 
-    // Text fallback only if doc creation failed completely
+    // Best-effort: attach the new doc to the same parent (e.g., frame) as the placeholder.
+    if (createdDocId && targetParentId) {
+      try {
+        await miroPatchJson(
+          `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(createdDocId)}`,
+          MIRO_ACCESS_TOKEN,
+          { parent: { id: targetParentId } }
+        );
+      } catch (e) {
+        docCreateErrors.push(e && e.message ? e.message : String(e));
+      }
+    }
+
+    // Delete the placeholder only after the new doc has been created.
+    if (createdDocId) {
+      replacedDocId = String(targetDoc.id);
+      try {
+        await miroDelete(
+          `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/docs/${encodeURIComponent(replacedDocId)}`,
+          MIRO_ACCESS_TOKEN
+        );
+      } catch (e) {
+        docCreateErrors.push(e && e.message ? e.message : String(e));
+      }
+    }
+
+    // Text fallback only if doc creation failed completely (we keep the placeholder in that case).
     if (!createdDocId) {
       try {
         const createdText = await miroPostJson(
           `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/texts`,
           MIRO_ACCESS_TOKEN,
-          { data: { content: answer }, position: { x: outX, y: outY, origin: "center" } }
+          { data: { content: answer }, position: createPos }
         );
         createdTextId = createdText && createdText.id ? String(createdText.id) : null;
       } catch {
@@ -225,6 +303,8 @@ export default async function handler(req, res) {
       openaiFileId: fileMeta.id,
       createdDocId,
       createdTextId,
+      targetDocTitle: TARGET_DOC_TITLE,
+      replacedDocId,
       docCreateErrors,
       answer
     });
@@ -260,6 +340,87 @@ async function miroPostJson(url, token, payload) {
   const text = await res.text();
   if (!res.ok) throw new Error(`Miro POST ${url} → ${res.status}: ${text}`);
   return text ? JSON.parse(text) : null;
+}
+
+async function miroPatchJson(url, token, payload) {
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Miro PATCH ${url} → ${res.status}: ${text}`);
+  return text ? JSON.parse(text) : null;
+}
+
+async function miroDelete(url, token) {
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  const text = await res.text().catch(() => "");
+  if (!res.ok) throw new Error(`Miro DELETE ${url} → ${res.status}: ${text}`);
+  return true;
+}
+
+function extractItemTitle(item) {
+  if (!item || typeof item !== "object") return "";
+  const candidates = [
+    item.title,
+    item.name,
+    item.data && item.data.title,
+    item.data && item.data.name
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) return c.trim();
+  }
+  return "";
+}
+
+function extractNextCursor(listResponse) {
+  if (!listResponse || typeof listResponse !== "object") return null;
+
+  // Common patterns in Miro cursor-based pagination responses.
+  if (typeof listResponse.cursor === "string" && listResponse.cursor) return listResponse.cursor;
+  if (listResponse.cursor && typeof listResponse.cursor === "object") {
+    if (typeof listResponse.cursor.next === "string" && listResponse.cursor.next) return listResponse.cursor.next;
+    if (typeof listResponse.cursor.cursor === "string" && listResponse.cursor.cursor) return listResponse.cursor.cursor;
+  }
+  if (typeof listResponse.nextCursor === "string" && listResponse.nextCursor) return listResponse.nextCursor;
+  if (typeof listResponse.next_page_token === "string" && listResponse.next_page_token) return listResponse.next_page_token;
+
+  return null;
+}
+
+async function findDocFormatByTitle(boardId, token, exactTitle) {
+  const wanted = String(exactTitle || "").trim();
+  if (!wanted) return null;
+
+  let cursor = null;
+  // Hard cap to avoid accidental infinite loops in case pagination behaves unexpectedly.
+  for (let i = 0; i < 100; i++) {
+    const url = new URL(`https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/items`);
+    url.searchParams.set("type", "doc_format");
+    url.searchParams.set("limit", "50");
+    if (cursor) url.searchParams.set("cursor", cursor);
+
+    const page = await miroGetJson(url.toString(), token);
+    const items = page && Array.isArray(page.data) ? page.data : [];
+
+    for (const it of items) {
+      if (!it || typeof it !== "object") continue;
+      if (String(it.type || "") !== "doc_format") continue;
+
+      const title = extractItemTitle(it);
+      if (title === wanted) return it;
+    }
+
+    const nextCursor = extractNextCursor(page);
+    if (!nextCursor) break;
+    cursor = nextCursor;
+  }
+
+  return null;
 }
 
 function normalizeMarkdown(s) {
@@ -485,7 +646,7 @@ async function openaiAnalyzePdf(openaiKey, model, prompt, fileId) {
         ]
       }
     ]
-    // IMPORTANT: do NOT set max_output_tokens here (no artificial cap). :contentReference[oaicite:2]{index=2}
+    // IMPORTANT: do NOT set max_output_tokens here (no artificial cap).
   };
 
   const res = await fetch("https://api.openai.com/v1/responses", {
