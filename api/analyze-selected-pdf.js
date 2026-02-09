@@ -400,6 +400,62 @@ async function findDocFormatByTitle(boardId, token, exactTitle) {
     return String(s || "").replace(/<[^>]*>/g, "");
   }
 
+  function extractDocContent(docObj) {
+    if (!docObj || typeof docObj !== "object") return "";
+    const data = (docObj.data && typeof docObj.data === "object") ? docObj.data : {};
+    if (typeof data.content === "string" && data.content.trim()) return data.content;
+    if (typeof docObj.content === "string" && docObj.content.trim()) return docObj.content;
+    return "";
+  }
+
+  function isEffectivelyEmptyDoc(detailsObj) {
+    const content = extractDocContent(detailsObj);
+    if (!content) return true;
+
+    const stripped = stripHtmlTags(content).replaceAll("\u00a0", " ").trim();
+    if (!stripped) return true;
+
+    // Exactly the title and nothing else.
+    if (stripped === wanted) return true;
+
+    // Single-line markdown title only: "# <wanted>"
+    const lines = String(content || "")
+      .split(/\r?\n/)
+      .map((l) => stripHtmlTags(l).replaceAll("\u00a0", " ").trim())
+      .filter(Boolean);
+
+    if (lines.length === 1) {
+      const first = lines[0].replace(/^#{1,6}\s+/, "").trim();
+      if (first === wanted) return true;
+    }
+
+    return false;
+  }
+
+  function mergeListItemAndDetails(listItem, details) {
+    // Keep position/geometry/parent from the items list response,
+    // but keep content from /docs/{id}.
+    const merged = {};
+
+    if (details && typeof details === "object") {
+      for (const k of Object.keys(details)) merged[k] = details[k];
+    }
+    if (listItem && typeof listItem === "object") {
+      for (const k of Object.keys(listItem)) merged[k] = listItem[k];
+    }
+
+    // Ensure the id is the board item id from /items listing.
+    if (listItem && listItem.id) merged.id = listItem.id;
+
+    // Deep-merge data (prefer details.data for content).
+    const data = {};
+    if (listItem && listItem.data && typeof listItem.data === "object") Object.assign(data, listItem.data);
+    if (details && details.data && typeof details.data === "object") Object.assign(data, details.data);
+    if (Object.keys(data).length) merged.data = data;
+
+    return merged;
+  }
+
   function extractDocFormatTitleFromContent(docObj) {
     if (!docObj || typeof docObj !== "object") return "";
 
@@ -407,8 +463,7 @@ async function findDocFormatByTitle(boardId, token, exactTitle) {
     const t = extractItemTitle(docObj);
     if (t) return t;
 
-    const data = docObj.data && typeof docObj.data === "object" ? docObj.data : {};
-    const content = (typeof data.content === "string" && data.content.trim()) ? data.content : "";
+    const content = extractDocContent(docObj);
     if (!content) return "";
 
     const lines = content.split(/\r?\n/);
@@ -434,7 +489,17 @@ async function findDocFormatByTitle(boardId, token, exactTitle) {
     return "";
   }
 
+  function geometryArea(listItem) {
+    const g = (listItem && listItem.geometry && typeof listItem.geometry === "object") ? listItem.geometry : {};
+    const w = (typeof g.width === "number" && Number.isFinite(g.width)) ? g.width : 0;
+    const h = (typeof g.height === "number" && Number.isFinite(g.height)) ? g.height : 0;
+    return w * h;
+  }
+
   let cursor = null;
+  let best = null;
+  let bestArea = -1;
+
   // Hard cap to avoid accidental infinite loops in case pagination behaves unexpectedly.
   for (let i = 0; i < 100; i++) {
     const url = new URL(`https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/items`);
@@ -450,30 +515,49 @@ async function findDocFormatByTitle(boardId, token, exactTitle) {
       if (String(it.type || "") !== "doc_format") continue;
       if (!it.id) continue;
 
-      // Fast path: if listing already includes a title-like field.
       const listTitle = extractItemTitle(it);
+
+      let details = null;
+      let isMatch = false;
+
       if (listTitle === wanted) {
+        isMatch = true;
         try {
-          const details = await miroGetJson(
+          details = await miroGetJson(
             `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/docs/${encodeURIComponent(it.id)}`,
             token
           );
-          return details || it;
         } catch {
-          return it;
+          details = null;
+        }
+      } else {
+        try {
+          details = await miroGetJson(
+            `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/docs/${encodeURIComponent(it.id)}`,
+            token
+          );
+          const derived = extractDocFormatTitleFromContent(details);
+          if (derived === wanted) isMatch = true;
+        } catch {
+          details = null;
         }
       }
 
-      // Robust path: derive "title" from doc content (first H1 / first non-empty line).
-      try {
-        const details = await miroGetJson(
-          `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/docs/${encodeURIComponent(it.id)}`,
-          token
-        );
-        const derived = extractDocFormatTitleFromContent(details);
-        if (derived === wanted) return details;
-      } catch {
-        // ignore and continue scanning
+      if (!isMatch) continue;
+
+      // Prefer the pre-positioned placeholder doc (effectively empty).
+      if (details && isEffectivelyEmptyDoc(details)) {
+        return mergeListItemAndDetails(it, details);
+      }
+
+      // Otherwise, prefer the visually "intended" one (largest geometry),
+      // so duplicates (typically smaller, created by the buggy run) don't get picked.
+      const area = geometryArea(it);
+      const merged = mergeListItemAndDetails(it, details);
+
+      if (!best || area > bestArea) {
+        best = merged;
+        bestArea = area;
       }
     }
 
@@ -482,7 +566,7 @@ async function findDocFormatByTitle(boardId, token, exactTitle) {
     cursor = nextCursor;
   }
 
-  return null;
+  return best;
 }
 
 
