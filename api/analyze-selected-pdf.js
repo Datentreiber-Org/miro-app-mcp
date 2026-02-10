@@ -277,8 +277,13 @@ export default async function handler(req, res) {
         const h = targetGeomHeightScaled;
         if (w !== null || h !== null) {
           payload.geometry = {};
-          if (w !== null) payload.geometry.width = w;
-          if (h !== null) payload.geometry.height = h;
+          // IMPORTANT: set only ONE dimension (width OR height), not both.
+          // This prevents the geometry-variant from failing and falling back to a non-geometry variant.
+          if (w !== null) {
+            payload.geometry.width = w;
+          } else if (h !== null) {
+            payload.geometry.height = h;
+          }
         }
       }
 
@@ -459,7 +464,7 @@ async function findDocFormatByTitle(boardId, token, exactTitle) {
 
   function isEffectivelyEmptyDoc(detailsObj) {
     const content = extractDocContent(detailsObj);
-    if (!content) return true;
+    if (!content) return false;
 
     const stripped = stripHtmlTags(content).replaceAll("\u00a0", " ").trim();
     if (!stripped) return true;
