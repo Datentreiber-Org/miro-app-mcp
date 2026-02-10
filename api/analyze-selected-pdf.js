@@ -190,11 +190,48 @@ export default async function handler(req, res) {
           ? String(targetDoc.parent.id)
           : null;
 
+    const SCALE_FACTOR = 3;
+
+    const targetGeomWidthBase =
+      (targetGeom && typeof targetGeom.width === "number" && Number.isFinite(targetGeom.width))
+        ? targetGeom.width
+        : null;
+
+    const targetGeomHeightBase =
+      (targetGeom && typeof targetGeom.height === "number" && Number.isFinite(targetGeom.height))
+        ? targetGeom.height
+        : null;
+
+    const targetGeomWidthScaled =
+      (targetGeomWidthBase !== null) ? (targetGeomWidthBase * SCALE_FACTOR) : null;
+
+    const targetGeomHeightScaled =
+      (targetGeomHeightBase !== null) ? (targetGeomHeightBase * SCALE_FACTOR) : null;
+
     const createPos = {
       x: targetPos.x,
       y: targetPos.y,
       origin: (targetPos && typeof targetPos.origin === "string" && targetPos.origin) ? targetPos.origin : "center"
     };
+
+    // Keep the placeholder's top-left corner fixed while scaling.
+    // For origin=center: shifting center by (Δwidth/2, Δheight/2) keeps top-left constant.
+    const createPosScaled = {
+      x: createPos.x,
+      y: createPos.y,
+      origin: createPos.origin
+    };
+
+    const originNorm = String(createPos.origin || "center").toLowerCase().replaceAll("_", "-");
+    if (originNorm === "center") {
+      if (targetGeomWidthBase !== null && targetGeomWidthScaled !== null) {
+        createPosScaled.x = createPos.x + ((targetGeomWidthScaled - targetGeomWidthBase) / 2);
+      }
+      if (targetGeomHeightBase !== null && targetGeomHeightScaled !== null) {
+        createPosScaled.y = createPos.y + ((targetGeomHeightScaled - targetGeomHeightBase) / 2);
+      }
+    }
+
 
     const docMarkdownWithTitleHeading = `# ${TARGET_DOC_TITLE}\n\n${docMarkdown}`;
 
@@ -227,22 +264,24 @@ export default async function handler(req, res) {
           contentType: v.contentType,
           content: v.content
         },
-        position: createPos
+        position: (v.includeGeometry ? createPosScaled : createPos)
       };
+
 
       if (v.includeTitle) {
         payload.data.title = TARGET_DOC_TITLE;
       }
 
       if (v.includeGeometry && targetGeom) {
-        const w = (typeof targetGeom.width === "number" && Number.isFinite(targetGeom.width)) ? targetGeom.width : null;
-        const h = (typeof targetGeom.height === "number" && Number.isFinite(targetGeom.height)) ? targetGeom.height : null;
+        const w = targetGeomWidthScaled;
+        const h = targetGeomHeightScaled;
         if (w !== null || h !== null) {
           payload.geometry = {};
           if (w !== null) payload.geometry.width = w;
           if (h !== null) payload.geometry.height = h;
         }
       }
+
 
       try {
         const created = await miroPostJson(
@@ -278,9 +317,19 @@ export default async function handler(req, res) {
           MIRO_ACCESS_TOKEN
         );
       } catch (e) {
-        docCreateErrors.push(e && e.message ? e.message : String(e));
+        // Fallback: some boards/items behave more consistently via the generic delete-item endpoint.
+        try {
+          await miroDelete(
+            `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(replacedDocId)}`,
+            MIRO_ACCESS_TOKEN
+          );
+        } catch (e2) {
+          docCreateErrors.push(e && e.message ? e.message : String(e));
+          docCreateErrors.push(e2 && e2.message ? e2.message : String(e2));
+        }
       }
     }
+
 
     // Text fallback only if doc creation failed completely (we keep the placeholder in that case).
     if (!createdDocId) {
