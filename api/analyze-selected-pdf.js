@@ -1,4 +1,4 @@
-const DEFAULT_OKR_PROMPT = [ 
+const DEFAULT_OKR_PROMPT = [
   "ROLE",
   "You are a senior strategy-to-execution consultant and OKR architect.",
   "",
@@ -66,11 +66,6 @@ export default async function handler(req, res) {
     res.status(500).send("Server misconfigured: MIRO_ACCESS_TOKEN is missing.");
     return;
   }
-
-  // MCP token optional: if not set, we try MIRO_ACCESS_TOKEN.
-  // If MCP server rejects it, set MIRO_MCP_ACCESS_TOKEN in Vercel env.
-  const MIRO_MCP_ACCESS_TOKEN = (process.env.MIRO_MCP_ACCESS_TOKEN || "").trim();
-  const MCP_TOKEN = MIRO_MCP_ACCESS_TOKEN || MIRO_ACCESS_TOKEN;
 
   const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || "").trim();
 
@@ -165,8 +160,9 @@ export default async function handler(req, res) {
     let answer = await openaiAnalyzePdf(effectiveOpenaiKey, effectiveModel, effectivePrompt, fileMeta.id);
     answer = normalizeMarkdown(answer);
 
-    // 5) Write result into the EXISTING, pre-positioned Miro Doc Format item via Miro MCP.
-    // MCP supports doc_get + doc_update (find-and-replace). REST does not provide content update for doc_format.
+    // 5) Write result into an existing, pre-positioned Miro Doc Format item.
+    // As there is no REST "update doc format content" endpoint, we recreate the doc at the same
+    // position (and best-effort geometry/parent), then delete the old placeholder.
     const docMarkdown =
       `# OKR Catalog — ${escapeMdInline(pdfTitleRaw)}\n\n` +
       answer;
@@ -177,166 +173,195 @@ export default async function handler(req, res) {
       return;
     }
 
-    const targetDocId = String(targetDoc.id);
+    const targetPos =
+      (targetDoc.position && typeof targetDoc.position.x === "number" && typeof targetDoc.position.y === "number")
+        ? targetDoc.position
+        : { x: outX, y: outY, origin: "center" };
 
-    // --- MCP session + tool discovery ---
-    const mcp = await mcpStartSession(MCP_TOKEN);
+    const targetGeom =
+      (targetDoc.geometry && typeof targetDoc.geometry === "object")
+        ? targetDoc.geometry
+        : null;
 
-    const toolsList = await mcpRequestJson(mcp, {
-      jsonrpc: "2.0",
-      id: 200,
-      method: "tools/list",
-      params: {}
-    });
+    const targetParentId =
+      (targetDoc.parent && typeof targetDoc.parent.id === "string" && targetDoc.parent.id)
+        ? targetDoc.parent.id
+        : (targetDoc.parent && typeof targetDoc.parent.id === "number")
+          ? String(targetDoc.parent.id)
+          : null;
 
-    const tools = toolsList && toolsList.result && Array.isArray(toolsList.result.tools) ? toolsList.result.tools : [];
-    const docGetTool = tools.find((t) => t && t.name === "doc_get");
-    const docUpdateTool = tools.find((t) => t && t.name === "doc_update");
+    const SCALE_FACTOR = 3;
 
-    if (!docGetTool || !docUpdateTool) {
-      res.status(500).json({
-        error: "Miro MCP tools missing: expected doc_get + doc_update.",
-        debug: {
-          haveDocGet: !!docGetTool,
-          haveDocUpdate: !!docUpdateTool,
-          toolNames: tools.map((t) => t && t.name).filter(Boolean)
+    const targetGeomWidthBase =
+      (targetGeom && typeof targetGeom.width === "number" && Number.isFinite(targetGeom.width))
+        ? targetGeom.width
+        : null;
+
+    const targetGeomHeightBase =
+      (targetGeom && typeof targetGeom.height === "number" && Number.isFinite(targetGeom.height))
+        ? targetGeom.height
+        : null;
+
+    const targetGeomWidthScaled =
+      (targetGeomWidthBase !== null) ? (targetGeomWidthBase * SCALE_FACTOR) : null;
+
+    const targetGeomHeightScaled =
+      (targetGeomHeightBase !== null) ? (targetGeomHeightBase * SCALE_FACTOR) : null;
+
+    const createPos = {
+      x: targetPos.x,
+      y: targetPos.y,
+      origin: (targetPos && typeof targetPos.origin === "string" && targetPos.origin) ? targetPos.origin : "center"
+    };
+
+    // Keep the placeholder's top-left corner fixed while scaling.
+    // For origin=center: shifting center by (Δwidth/2, Δheight/2) keeps top-left constant.
+    const createPosScaled = {
+      x: createPos.x,
+      y: createPos.y,
+      origin: createPos.origin
+    };
+
+    const originNorm = String(createPos.origin || "center").toLowerCase().replaceAll("_", "-");
+    if (originNorm === "center") {
+      if (targetGeomWidthBase !== null && targetGeomWidthScaled !== null) {
+        createPosScaled.x = createPos.x + ((targetGeomWidthScaled - targetGeomWidthBase) / 2);
+      }
+      if (targetGeomHeightBase !== null && targetGeomHeightScaled !== null) {
+        createPosScaled.y = createPos.y + ((targetGeomHeightScaled - targetGeomHeightBase) / 2);
+      }
+    }
+
+
+    const docMarkdownWithTitleHeading = `# ${TARGET_DOC_TITLE}\n\n${docMarkdown}`;
+
+    let createdDocId = null;
+    let createdTextId = null;
+    const docCreateErrors = [];
+    let replacedDocId = null;
+
+    const createVariants = [
+      // Prefer setting the doc title explicitly (if supported by the endpoint).
+      { contentType: "markdown", content: docMarkdown, includeTitle: true, includeGeometry: true },
+      { contentType: "markdown", content: docMarkdown, includeTitle: true, includeGeometry: false },
+
+      // Fallback: if title is not supported, force the title via the first heading.
+      { contentType: "markdown", content: docMarkdownWithTitleHeading, includeTitle: false, includeGeometry: true },
+      { contentType: "markdown", content: docMarkdownWithTitleHeading, includeTitle: false, includeGeometry: false },
+
+      // HTML fallbacks.
+      { contentType: "html", content: toSimpleHtml(docMarkdown), includeTitle: true, includeGeometry: true },
+      { contentType: "html", content: toSimpleHtml(docMarkdown), includeTitle: true, includeGeometry: false },
+      { contentType: "html", content: toSimpleHtml(docMarkdownWithTitleHeading), includeTitle: false, includeGeometry: true },
+      { contentType: "html", content: toSimpleHtml(docMarkdownWithTitleHeading), includeTitle: false, includeGeometry: false }
+    ];
+
+    for (const v of createVariants) {
+      if (createdDocId) break;
+
+      const payload = {
+        data: {
+          contentType: v.contentType,
+          content: v.content
+        },
+        position: (v.includeGeometry ? createPosScaled : createPos)
+      };
+
+
+      if (v.includeTitle) {
+        payload.data.title = TARGET_DOC_TITLE;
+      }
+
+      if (v.includeGeometry && targetGeom) {
+        const w = targetGeomWidthScaled;
+        const h = targetGeomHeightScaled;
+        if (w !== null || h !== null) {
+          payload.geometry = {};
+          // IMPORTANT: set only ONE dimension (width OR height), not both.
+          // This prevents the geometry-variant from failing and falling back to a non-geometry variant.
+          if (w !== null) {
+            payload.geometry.width = w;
+          } else if (h !== null) {
+            payload.geometry.height = h;
+          }
         }
-      });
-      return;
-    }
-
-    // --- doc_get ---
-    const docGetArgs = buildDocGetArgs(docGetTool.inputSchema, boardId, targetDocId);
-
-    const docGetCall = await mcpRequestJson(mcp, {
-      jsonrpc: "2.0",
-      id: 201,
-      method: "tools/call",
-      params: {
-        name: "doc_get",
-        arguments: docGetArgs
       }
-    });
 
-    const docInfo = parseDocGetCall(docGetCall);
-    const currentMarkdown = (docInfo && typeof docInfo.markdown === "string") ? docInfo.markdown : "";
-    const currentVersion = docInfo ? docInfo.version : null;
-
-    const titleLine = `# ${TARGET_DOC_TITLE}`;
-
-    // Preserve whatever the existing doc uses as its "title" convention:
-    // - If current markdown starts with "# <TITLE>" (typical placeholder), keep that heading at the top.
-    // - Otherwise, write only the OKR markdown (matches your previous behavior when title was set separately).
-    const desiredMarkdown =
-      (!currentMarkdown.trim() || currentMarkdown.trim().startsWith(titleLine))
-        ? `${titleLine}\n\n${docMarkdown}`
-        : docMarkdown;
-
-    // --- doc_update attempts ---
-    const updateAttempts = [];
-    let updated = false;
-
-    const isEmptyPlaceholder = isEffectivelyEmptyMarkdown(currentMarkdown, TARGET_DOC_TITLE);
-
-    const candidates = [];
-
-    // Preferred: replace the whole document by finding exactly what doc_get returned.
-    if (currentMarkdown && currentMarkdown !== desiredMarkdown) {
-      candidates.push({ find: currentMarkdown, replace: desiredMarkdown, reason: "replace-entire-doc-exact" });
-    }
-
-    // If placeholder is effectively empty, allow small "find" strings (more robust).
-    if (isEmptyPlaceholder) {
-      // Try exact current first (already added above), then common placeholder variants.
-      if (currentMarkdown.trim() && currentMarkdown.trim() !== currentMarkdown) {
-        candidates.push({ find: currentMarkdown.trim(), replace: desiredMarkdown, reason: "replace-entire-doc-trim" });
-      }
-      candidates.push({ find: titleLine, replace: desiredMarkdown, reason: "replace-title-heading-only" });
-      candidates.push({ find: TARGET_DOC_TITLE, replace: desiredMarkdown, reason: "replace-plain-title-only" });
-    }
-
-    // No-op guard
-    if (!candidates.length) {
-      res.status(200).json({
-        ok: true,
-        boardId,
-        itemId,
-        openaiFileId: fileMeta.id,
-        createdDocId: targetDocId,     // keep frontend compatibility
-        updatedDocId: targetDocId,
-        targetDocTitle: TARGET_DOC_TITLE,
-        answer,
-        mcp: { updated: false, reason: "already-up-to-date-or-empty-candidates" }
-      });
-      return;
-    }
-
-    for (let i = 0; i < candidates.length; i++) {
-      const c = candidates[i];
-      if (updated) break;
-      if (!c || typeof c.find !== "string" || !c.find) continue;
-
-      const docUpdateArgs = buildDocUpdateArgs(
-        docUpdateTool.inputSchema,
-        boardId,
-        targetDocId,
-        c.find,
-        c.replace,
-        true,            // replace all occurrences if supported
-        currentVersion   // optimistic concurrency if supported
-      );
 
       try {
-        const docUpdateCall = await mcpRequestJson(mcp, {
-          jsonrpc: "2.0",
-          id: 210 + i,
-          method: "tools/call",
-          params: {
-            name: "doc_update",
-            arguments: docUpdateArgs
-          }
-        });
-
-        parseDocUpdateCall(docUpdateCall);
-
-        updated = true;
-        updateAttempts.push({ ok: true, reason: c.reason });
+        const created = await miroPostJson(
+          `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/docs`,
+          MIRO_ACCESS_TOKEN,
+          payload
+        );
+        createdDocId = created && created.id ? String(created.id) : null;
       } catch (e) {
-        updateAttempts.push({ ok: false, reason: c.reason, error: (e && e.message) ? e.message : String(e) });
+        docCreateErrors.push(e && e.message ? e.message : String(e));
       }
     }
 
-    if (!updated) {
-      res.status(500).json({
-        error: "Miro MCP doc_update failed. Doc content was NOT updated.",
-        boardId,
-        itemId,
-        targetDocId,
-        targetDocTitle: TARGET_DOC_TITLE,
-        debug: {
-          docGetArgs,
-          docInfo,
-          isEmptyPlaceholder,
-          updateAttempts
-        }
-      });
-      return;
+    // Best-effort: attach the new doc to the same parent (e.g., frame) as the placeholder.
+    if (createdDocId && targetParentId) {
+      try {
+        await miroPatchJson(
+          `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(createdDocId)}`,
+          MIRO_ACCESS_TOKEN,
+          { parent: { id: targetParentId } }
+        );
+      } catch (e) {
+        docCreateErrors.push(e && e.message ? e.message : String(e));
+      }
     }
 
-    // Keep the response fields that your frontend already expects:
-    // index.html checks createdDocId to show a success toast.
+    // Delete the placeholder only after the new doc has been created.
+    if (createdDocId) {
+      replacedDocId = String(targetDoc.id);
+      try {
+        await miroDelete(
+          `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/docs/${encodeURIComponent(replacedDocId)}`,
+          MIRO_ACCESS_TOKEN
+        );
+      } catch (e) {
+        // Fallback: some boards/items behave more consistently via the generic delete-item endpoint.
+        try {
+          await miroDelete(
+            `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(replacedDocId)}`,
+            MIRO_ACCESS_TOKEN
+          );
+        } catch (e2) {
+          docCreateErrors.push(e && e.message ? e.message : String(e));
+          docCreateErrors.push(e2 && e2.message ? e2.message : String(e2));
+        }
+      }
+    }
+
+
+    // Text fallback only if doc creation failed completely (we keep the placeholder in that case).
+    if (!createdDocId) {
+      try {
+        const createdText = await miroPostJson(
+          `https://api.miro.com/v2/boards/${encodeURIComponent(boardId)}/texts`,
+          MIRO_ACCESS_TOKEN,
+          { data: { content: answer }, position: createPos }
+        );
+        createdTextId = createdText && createdText.id ? String(createdText.id) : null;
+      } catch {
+        // ignore
+      }
+    }
+
     res.status(200).json({
       ok: true,
       boardId,
       itemId,
       openaiFileId: fileMeta.id,
-      createdDocId: targetDocId,
-      updatedDocId: targetDocId,
+      createdDocId,
+      createdTextId,
       targetDocTitle: TARGET_DOC_TITLE,
-      answer,
-      mcp: { updated: true, updateAttempts }
+      replacedDocId,
+      docCreateErrors,
+      answer
     });
-    return;
   } catch (e) {
     res.status(500).send(e && e.message ? e.message : String(e));
   }
@@ -842,283 +867,4 @@ async function openaiAnalyzePdf(openaiKey, model, prompt, fileId) {
   const content = first && first.content;
   const textPart = content && content.find((c) => c.type === "output_text");
   return textPart ? textPart.text : "";
-}
-
-// --------------------
-// MCP CLIENT (Streamable HTTP JSON-RPC)
-// --------------------
-// Miro MCP remote endpoint: https://mcp.miro.com/
-// Tools include doc_get + doc_update. (See Miro MCP tools list in docs.)
-async function mcpStartSession(token) {
-  const endpoint = "https://mcp.miro.com/";
-  const initReq = {
-    jsonrpc: "2.0",
-    id: 1,
-    method: "initialize",
-    params: {
-      protocolVersion: "2025-06-18",
-      capabilities: {},
-      clientInfo: { name: "datentreiber-miro-app", version: "1.0" }
-    }
-  };
-
-  const { sessionId } = await mcpPost(endpoint, token, null, initReq);
-  return { endpoint, token, sessionId };
-}
-
-async function mcpRequestJson(mcp, reqObj) {
-  const { json } = await mcpPost(mcp.endpoint, mcp.token, mcp.sessionId, reqObj);
-  return json;
-}
-
-async function mcpPost(endpoint, token, sessionId, reqObj) {
-  const headers = {
-    "Content-Type": "application/json",
-    "Accept": "application/json, text/event-stream",
-    "Authorization": `Bearer ${token}`,
-    "Origin": "https://miro-app-mcp.vercel.app"
-  };
-  if (sessionId) headers["Mcp-Session-Id"] = sessionId;
-
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(reqObj),
-    redirect: "follow"
-  });
-
-  const newSessionId = res.headers.get("Mcp-Session-Id") || sessionId || null;
-
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`MCP POST ${endpoint} → ${res.status}: ${t}`);
-  }
-
-  const ct = (res.headers.get("content-type") || "").toLowerCase();
-
-  if (ct.includes("application/json")) {
-    const json = await res.json();
-    return { json, sessionId: newSessionId };
-  }
-
-  if (ct.includes("text/event-stream")) {
-    const text = await res.text();
-    const json = parseSseForJsonRpc(text, reqObj.id);
-    if (!json) throw new Error("MCP SSE response did not contain a JSON-RPC message.");
-    return { json, sessionId: newSessionId };
-  }
-
-  const raw = await res.text();
-  try {
-    return { json: JSON.parse(raw), sessionId: newSessionId };
-  } catch {
-    throw new Error(`MCP unexpected content-type=${ct}, body=${raw.slice(0, 200)}`);
-  }
-}
-
-function parseSseForJsonRpc(sseText, desiredId) {
-  const lines = String(sseText || "").split("\n");
-  let lastJson = null;
-
-  for (const line of lines) {
-    const l = line.trim();
-    if (!l.startsWith("data:")) continue;
-    const payload = l.slice(5).trim();
-    if (!payload) continue;
-
-    try {
-      const obj = JSON.parse(payload);
-      lastJson = obj;
-      if (typeof desiredId !== "undefined" && obj && obj.id === desiredId) return obj;
-    } catch {
-      // ignore
-    }
-  }
-  return lastJson;
-}
-
-// --------------------
-// MCP doc_get / doc_update helpers
-// --------------------
-
-function buildDocGetArgs(inputSchema, boardId, docId) {
-  const args = {};
-
-  const props = (inputSchema && inputSchema.properties && typeof inputSchema.properties === "object")
-    ? Object.keys(inputSchema.properties)
-    : [];
-
-  const has = (k) => props.includes(k);
-
-  // Board
-  if (has("board_id")) args.board_id = boardId;
-  else if (has("boardId")) args.boardId = boardId;
-  else if (has("board")) args.board = boardId;
-
-  // Doc
-  if (has("doc_id")) args.doc_id = docId;
-  else if (has("docId")) args.docId = docId;
-  else if (has("document_id")) args.document_id = docId;
-  else if (has("documentId")) args.documentId = docId;
-  else if (has("id")) args.id = docId;
-
-  // If schema unknown, use common defaults
-  if (props.length === 0) {
-    args.board_id = boardId;
-    args.doc_id = docId;
-  }
-
-  return args;
-}
-
-function buildDocUpdateArgs(inputSchema, boardId, docId, findText, replaceText, replaceAll, version) {
-  const args = {};
-
-  const props = (inputSchema && inputSchema.properties && typeof inputSchema.properties === "object")
-    ? Object.keys(inputSchema.properties)
-    : [];
-
-  const has = (k) => props.includes(k);
-
-  // Board
-  if (has("board_id")) args.board_id = boardId;
-  else if (has("boardId")) args.boardId = boardId;
-  else if (has("board")) args.board = boardId;
-
-  // Doc
-  if (has("doc_id")) args.doc_id = docId;
-  else if (has("docId")) args.docId = docId;
-  else if (has("document_id")) args.document_id = docId;
-  else if (has("documentId")) args.documentId = docId;
-  else if (has("id")) args.id = docId;
-
-  // Find
-  if (has("find")) args.find = findText;
-  else if (has("search")) args.search = findText;
-  else if (has("find_text")) args.find_text = findText;
-  else if (has("findText")) args.findText = findText;
-  else if (has("search_text")) args.search_text = findText;
-  else if (has("from")) args.from = findText;
-  else if (has("match")) args.match = findText;
-
-  // Replace
-  if (has("replace")) args.replace = replaceText;
-  else if (has("replacement")) args.replacement = replaceText;
-  else if (has("replace_text")) args.replace_text = replaceText;
-  else if (has("replaceText")) args.replaceText = replaceText;
-  else if (has("to")) args.to = replaceText;
-
-  // Replace-all / occurrences
-  if (has("replace_all")) args.replace_all = !!replaceAll;
-  else if (has("replaceAll")) args.replaceAll = !!replaceAll;
-  else if (has("all_occurrences")) args.all_occurrences = !!replaceAll;
-  else if (has("allOccurrences")) args.allOccurrences = !!replaceAll;
-  else if (has("occurrence")) args.occurrence = replaceAll ? "all" : "single";
-  else if (has("occurrences")) args.occurrences = replaceAll ? "all" : "single";
-
-  // Version (optimistic concurrency), if supported
-  if (version !== null && typeof version !== "undefined") {
-    if (has("version")) args.version = version;
-    else if (has("doc_version")) args.doc_version = version;
-    else if (has("docVersion")) args.docVersion = version;
-    else if (has("revision")) args.revision = version;
-  }
-
-  // If schema unknown, use conservative defaults
-  if (props.length === 0) {
-    args.board_id = boardId;
-    args.doc_id = docId;
-    args.find = findText;
-    args.replace = replaceText;
-    args.replace_all = !!replaceAll;
-    if (version !== null && typeof version !== "undefined") args.version = version;
-  }
-
-  return args;
-}
-
-function parseDocGetCall(callResp) {
-  if (!callResp || typeof callResp !== "object") throw new Error("MCP doc_get: empty response.");
-  if (callResp.error) {
-    const msg = callResp.error.message || JSON.stringify(callResp.error);
-    throw new Error(`MCP doc_get error: ${msg}`);
-  }
-
-  const result = callResp.result || {};
-  const structured = result.structuredContent || null;
-
-  if (structured && typeof structured === "object") {
-    const md =
-      (typeof structured.markdown === "string" && structured.markdown) ? structured.markdown :
-      (typeof structured.content === "string" && structured.content) ? structured.content :
-      (typeof structured.text === "string" && structured.text) ? structured.text :
-      "";
-
-    const version =
-      (typeof structured.version !== "undefined") ? structured.version :
-      (typeof structured.doc_version !== "undefined") ? structured.doc_version :
-      (typeof structured.docVersion !== "undefined") ? structured.docVersion :
-      (typeof structured.revision !== "undefined") ? structured.revision :
-      null;
-
-    return { markdown: md, version };
-  }
-
-  // Fallback: sometimes content[0].text contains JSON or markdown
-  const content = Array.isArray(result.content) ? result.content : [];
-  const firstText = content.find((c) => c && c.type === "text" && typeof c.text === "string");
-
-  if (firstText && typeof firstText.text === "string") {
-    // Try JSON first
-    try {
-      const obj = JSON.parse(firstText.text);
-      const md =
-        (typeof obj.markdown === "string" && obj.markdown) ? obj.markdown :
-        (typeof obj.content === "string" && obj.content) ? obj.content :
-        (typeof obj.text === "string" && obj.text) ? obj.text :
-        "";
-
-      const version =
-        (typeof obj.version !== "undefined") ? obj.version :
-        (typeof obj.doc_version !== "undefined") ? obj.doc_version :
-        (typeof obj.docVersion !== "undefined") ? obj.docVersion :
-        (typeof obj.revision !== "undefined") ? obj.revision :
-        null;
-
-      return { markdown: md, version };
-    } catch {
-      // Treat as raw markdown
-      return { markdown: firstText.text, version: null };
-    }
-  }
-
-  return { markdown: "", version: null };
-}
-
-function parseDocUpdateCall(callResp) {
-  if (!callResp || typeof callResp !== "object") throw new Error("MCP doc_update: empty response.");
-  if (callResp.error) {
-    const msg = callResp.error.message || JSON.stringify(callResp.error);
-    throw new Error(`MCP doc_update error: ${msg}`);
-  }
-  return callResp.result || {};
-}
-
-function isEffectivelyEmptyMarkdown(markdown, wantedTitle) {
-  const md = String(markdown || "").replaceAll("\u00a0", " ").trim();
-  if (!md) return true;
-
-  const title = String(wantedTitle || "").trim();
-  if (!title) return false;
-
-  if (md === title) return true;
-  if (md === `# ${title}`) return true;
-
-  const lines = md.split(/\r?\n/).map((l) => String(l || "").trim()).filter(Boolean);
-  if (lines.length === 1) {
-    const l = lines[0].replace(/^#{1,6}\s+/, "").trim();
-    if (l === title) return true;
-  }
-
-  return false;
 }
