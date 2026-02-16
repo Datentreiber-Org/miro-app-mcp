@@ -114,30 +114,16 @@
   }
 
   function toHtmlButtonContent(boardId) {
-    // Fallback to old content if boardId isn't available for any reason.
-    if (!boardId) {
-      return (
-        `<p><strong>${escapeHtml(BUTTON_LABEL_TEXT)}</strong></p>` +
-        `<p style="font-size:12px;opacity:.8;">${escapeHtml(BUTTON_SUBTEXT)}</p>` +
-        `<p style="font-size:10px;opacity:.01;">${BUTTON_MARKER}</p>`
-      );
-    }
-
-    const prompt = buildLovablePrompt(boardId);
-    const url = buildLovableUrl(prompt);
-
-    // Shapes support <a> tags in content; using a normal hyperlink improves reliability
-    // for collaborators because it no longer depends on the app runtime events.
+    // IMPORTANT: Keep shape HTML SHORT and stable.
+    // Do NOT embed long encoded URLs inside shape content; it can be truncated and break rendering.
+    // The link will be attached via `linkedTo` on the shape (and optionally opened on selection).
     return (
-      `<p><strong>` +
-        `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;color:inherit;">` +
-          `${escapeHtml(BUTTON_LABEL_TEXT)}` +
-        `</a>` +
-      `</strong></p>` +
+      `<p><strong>${escapeHtml(BUTTON_LABEL_TEXT)}</strong></p>` +
       `<p style="font-size:12px;opacity:.8;">${escapeHtml(BUTTON_SUBTEXT)}</p>` +
       `<p style="font-size:10px;opacity:.01;">${BUTTON_MARKER}</p>`
     );
   }
+
 
   async function getShapeById(id) {
     if (!id) return null;
@@ -177,23 +163,29 @@
 
     await setAppDataKey(APPDATA_FRAME_ID_KEY, frame.id);
 
-    // We want the button content to include a real hyperlink, which needs the boardId.
-    let boardId = null;
-    try {
-      const info = await miro.board.getInfo();
-      boardId = info && info.id ? info.id : null;
-    } catch (e) {}
-
-    const desiredContent = toHtmlButtonContent(boardId);
+    // Keep button content short (no embedded URL).
+    const desiredContent = toHtmlButtonContent(null);
 
     const existing = await findExistingButtonShape();
     if (existing && existing.type === "shape") {
-      // Keep content up-to-date (so the button label stays a working hyperlink).
+      // Keep content up-to-date (stable, short HTML).
       try {
         if (typeof desiredContent === "string" && desiredContent && existing.content !== desiredContent) {
           existing.content = desiredContent;
-          if (typeof existing.sync === "function") await existing.sync();
         }
+      } catch (e) {}
+
+      // Ensure stable styling (green button + white text).
+      try {
+        existing.style = existing.style && typeof existing.style === "object" ? existing.style : {};
+        existing.style.fillColor = "#00C853";
+        existing.style.borderColor = "#0B8043";
+        existing.style.borderWidth = 2;
+        existing.style.color = "#ffffff";
+      } catch (e) {}
+
+      try {
+        if (typeof existing.sync === "function") await existing.sync();
       } catch (e) {}
 
       try {
@@ -202,6 +194,7 @@
           if (typeof frame.sync === "function") await frame.sync();
         }
       } catch (e) {}
+
       await setAppDataKey(APPDATA_BUTTON_ID_KEY, existing.id);
       return existing;
     }
@@ -214,6 +207,7 @@
     const btnW = 340;
     const btnH = 120;
 
+    // Top-right inside frame, with padding.
     const bx = fx + (fw / 2) - (btnW / 2) - 40;
     const by = fy - (fh / 2) + (btnH / 2) + 40;
 
@@ -223,7 +217,13 @@
       x: bx,
       y: by,
       width: btnW,
-      height: btnH
+      height: btnH,
+      style: {
+        fillColor: "#00C853",
+        borderColor: "#0B8043",
+        borderWidth: 2,
+        color: "#ffffff"
+      }
     });
 
     try {
@@ -239,6 +239,7 @@
 
     return btn;
   }
+
 
   function buildBoardUrlFromId(boardId) {
     const encoded = encodeURIComponent(String(boardId || ""));
@@ -314,60 +315,26 @@
       return;
     }
 
-    // Ensure button exists; we'll place the link right next to it inside the frame.
+    // Ensure button exists.
     const btn = await ensureLovableButton();
     if (!btn) {
       await notifyError("Lovable button not found.");
       return;
     }
 
-    const fx = Number.isFinite(frame.x) ? frame.x : 0;
-    const fy = Number.isFinite(frame.y) ? frame.y : 0;
-    const fw = Number.isFinite(frame.width) ? frame.width : 1600;
-    const fh = Number.isFinite(frame.height) ? frame.height : 900;
-
-    const bx = Number.isFinite(btn.x) ? btn.x : fx;
-    const by = Number.isFinite(btn.y) ? btn.y : fy;
-    const bw = Number.isFinite(btn.width) ? btn.width : 340;
-
-    const textW = 420;
-    const pad = 40;
-    const gapX = 30;
-
-    let x = bx + (bw / 2) + gapX + (textW / 2);
-    let y = by;
-
-    // Clamp inside the frame bounds.
-    const left = fx - (fw / 2);
-    const right = fx + (fw / 2);
-    const top = fy - (fh / 2);
-    const bottom = fy + (fh / 2);
-
-    x = Math.max(left + (textW / 2) + pad, Math.min(x, right - (textW / 2) - pad));
-    y = Math.max(top + pad, Math.min(y, bottom - pad));
-
-    // Short, clean link only (no raw URL line, no long explanatory text).
-    const html =
-      `<p>` +
-      `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">` +
-      `<strong>Open Lovable (autosubmit)</strong>` +
-      `</a>` +
-      `</p>`;
-
-    const textItem = await miro.board.createText({ content: html, x, y, width: textW });
-
+    // Attach link directly to the shape (stable fallback: arrow icon on the shape).
+    // When present, Miro shows an arrow icon in the top-right corner of the item; clicking it opens the link. :contentReference[oaicite:1]{index=1}
     try {
-      if (textItem && typeof frame.add === "function") {
-        await frame.add(textItem);
-        if (typeof frame.sync === "function") await frame.sync();
-      }
+      btn.linkedTo = url;
+      if (typeof btn.sync === "function") await btn.sync();
     } catch (e) {}
 
+    // Optional: try to open immediately on user selection (may be blocked in some environments).
     try {
-      await miro.board.viewport.zoomTo(textItem);
+      window.open(url, "_blank", "noopener,noreferrer");
     } catch (e) {}
 
-    await notifyInfo("Lovable link created inside the frame (next to button).");
+    await notifyInfo("Lovable link attached to the button (use the arrow icon on the shape if pop-up is blocked).");
   }
 
   // ============================
