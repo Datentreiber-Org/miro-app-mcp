@@ -118,9 +118,8 @@
     // Do NOT embed long encoded URLs inside shape content; it can be truncated and break rendering.
     // The link will be attached via `linkedTo` on the shape (and optionally opened on selection).
     return (
-      `<p><strong>${escapeHtml(BUTTON_LABEL_TEXT)}</strong></p>` +
-      `<p style="font-size:12px;opacity:.8;">${escapeHtml(BUTTON_SUBTEXT)}</p>` +
-      `<p style="font-size:10px;opacity:.01;">${BUTTON_MARKER}</p>`
+      `<p><strong>${escapeHtml(BUTTON_LABEL_TEXT)}</strong></p>`
+     
     );
   }
 
