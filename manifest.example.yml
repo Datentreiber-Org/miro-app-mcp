@@ -3,7 +3,7 @@
 
 appName: Miro Lovable MCP Button
 sdkVersion: SDK_V2
-sdkUri: https://YOUR-HOST.example.com/
+sdkUri: https://datentreiber-org.github.io/miro-app-mcp/
 scopes:
   - boards:read
   - boards:write
