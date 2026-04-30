@@ -9,7 +9,7 @@ scopes:
   - boards:write
 boardPicker:
   allowedDomains:
-    - YOUR-HOST.example.com
+    - https://datentreiber-org.github.io/miro-app-mcp/
     - localhost
 icons:
   outline: >-
