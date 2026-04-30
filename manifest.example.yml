@@ -1,0 +1,18 @@
+# Example manifest for a private Miro Web SDK app.
+# Replace https://YOUR-HOST.example.com/ with your deployed index.html URL.
+
+appName: Miro Lovable MCP Button
+sdkVersion: SDK_V2
+sdkUri: https://YOUR-HOST.example.com/
+scopes:
+  - boards:read
+  - boards:write
+boardPicker:
+  allowedDomains:
+    - YOUR-HOST.example.com
+    - localhost
+icons:
+  outline: >-
+    <svg viewBox="0 0 24 24" height="48" width="48" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M13 2 3 14h7l-1 8 11-14h-7l1-6z"/></svg>
+  colored: >-
+    <svg viewBox="0 0 24 24" height="48" width="48" xmlns="http://www.w3.org/2000/svg"><rect width="24" height="24" rx="6" fill="#00C853"/><path d="M13 2 3 14h7l-1 8 11-14h-7l1-6z" fill="#fff"/></svg>
